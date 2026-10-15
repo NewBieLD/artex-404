@@ -527,6 +527,10 @@ func (s *Server) interceptSetJudgeConfig(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, "ask_timeout_action 必须是 allow 或 deny")
 		return
 	}
+	if err := req.ValidateRetry(); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if err := s.m.interceptor.SetJudgeConfig(req); err != nil {
 		writeErr(w, 500, err.Error())
 		return
