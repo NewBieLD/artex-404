@@ -161,6 +161,20 @@ export default function AssetsPage() {
   const [companyDeleteTarget, setCompanyDeleteTarget] = React.useState<Company | null>(null);
   const [companyDeleteAssets, setCompanyDeleteAssets] = React.useState(false);
   const [companyDeleting, setCompanyDeleting] = React.useState(false);
+  // 企业批量删除:独立选择集(与资产 tab 的 selected 不混用),确认时串行走单删接口
+  //(每次删企业各自事务,失败逐家回报;企业量级小,无需后端批量端点)。
+  const [selectedCompanies, setSelectedCompanies] = React.useState<Set<number>>(() => new Set());
+  const [companyBatchOpen, setCompanyBatchOpen] = React.useState(false);
+  const [companyBatchAssets, setCompanyBatchAssets] = React.useState(false);
+  const [companyBatchDeleting, setCompanyBatchDeleting] = React.useState(false);
+  const toggleCompanySelect = (id: number) => {
+    setSelectedCompanies((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   // Companies + per-type counts (tab badges) — loaded on demand, no background polling.
   const loadMeta = React.useCallback(() => {
@@ -251,6 +265,34 @@ export default function AssetsPage() {
     }
   };
 
+  const confirmBatchDeleteCompanies = async () => {
+    const ids = [...selectedCompanies];
+    if (ids.length === 0 || companyBatchDeleting) return;
+    setCompanyBatchDeleting(true);
+    let deleted = 0;
+    let assetsDeleted = 0;
+    const failed: { id: number; error: string }[] = [];
+    for (const id of ids) {
+      try {
+        const res = await api.deleteCompany(id, companyBatchAssets);
+        deleted += res.deleted ?? 1;
+        assetsDeleted += res.assets_deleted ?? 0;
+      } catch (e) {
+        failed.push({ id, error: String((e as Error)?.message ?? e) });
+      }
+    }
+    setCompanyBatchDeleting(false);
+    setCompanyBatchOpen(false);
+    setCompanyBatchAssets(false);
+    setSelectedCompanies(new Set());
+    const parts = [`已删除 ${deleted} 家企业`];
+    if (companyBatchAssets && assetsDeleted > 0) parts.push(`连带 ${assetsDeleted} 条资产`);
+    if (failed.length > 0) parts.push(`${failed.length} 家失败(详见控制台)`);
+    if (failed.length > 0) console.warn("企业批量删除失败清单:", failed);
+    toast.success(parts.join("，"));
+    refresh();
+  };
+
   React.useEffect(() => {
     loadMeta();
   }, [loadMeta]);
@@ -261,6 +303,7 @@ export default function AssetsPage() {
     setQuery("");
     setDslError("");
     setSelected(new Set());
+    setSelectedCompanies(new Set());
     setRows([]);
     setRowsTab("");
     setTotal(0);
@@ -350,11 +393,17 @@ export default function AssetsPage() {
           <span className="text-sm text-muted-foreground">
             共 <span className="tabular-nums">{totalAssets}</span> 项资产
           </span>
-          {selected.size > 0 && (
-            <Button variant="destructive" size="sm" onClick={() => openDelete(Array.from(selected) as number[])}>
-              <Trash2Icon className="size-3.5" /> 删除已选 ({selected.size})
-            </Button>
-          )}
+          {tab === "company"
+            ? selectedCompanies.size > 0 && (
+                <Button variant="destructive" size="sm" onClick={() => setCompanyBatchOpen(true)}>
+                  <Trash2Icon className="size-3.5" /> 删除已选企业 ({selectedCompanies.size})
+                </Button>
+              )
+            : selected.size > 0 && (
+                <Button variant="destructive" size="sm" onClick={() => openDelete(Array.from(selected) as number[])}>
+                  <Trash2Icon className="size-3.5" /> 删除已选 ({selected.size})
+                </Button>
+              )}
           <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
             <RefreshCwIcon className={cn("size-4", loading && "animate-spin")} /> 刷新
           </Button>
@@ -382,6 +431,17 @@ export default function AssetsPage() {
               <Table>
                 <TableHeader className="sticky top-0 z-10 bg-card">
                   <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        aria-label="全选当前企业"
+                        checked={companies.length > 0 && selectedCompanies.size === companies.length}
+                        onCheckedChange={() => {
+                          setSelectedCompanies((cur) =>
+                            cur.size === companies.length ? new Set() : new Set(companies.map((c) => c.id)),
+                          );
+                        }}
+                      />
+                    </TableHead>
                     <TableHead>企业</TableHead>
                     <TableHead className="w-24 text-right">资产数</TableHead>
                     <TableHead>资产范围</TableHead>
@@ -391,6 +451,13 @@ export default function AssetsPage() {
                 <TableBody>
                   {companies.map((c) => (
                     <TableRow key={c.id}>
+                      <TableCell>
+                        <Checkbox
+                          aria-label={`选择企业 ${c.name}`}
+                          checked={selectedCompanies.has(c.id)}
+                          onCheckedChange={() => toggleCompanySelect(c.id)}
+                        />
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
                           <CompanyAvatar name={c.name} logo={c.logo} />
@@ -433,7 +500,7 @@ export default function AssetsPage() {
                   ))}
                   {companies.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={4} className="py-10 text-center text-sm text-muted-foreground">
+                      <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
                         还没有企业。点击右上角「新增企业」并填写资产范围，系统会自动认领命中的资产。
                       </TableCell>
                     </TableRow>
@@ -835,6 +902,47 @@ export default function AssetsPage() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {companyDeleting ? "删除中…" : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 企业批量删除确认:逐家事务删除,失败清单在控制台;连带资产选项与单删同款 */}
+      <AlertDialog open={companyBatchOpen} onOpenChange={setCompanyBatchOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除选中的 {selectedCompanies.size} 家企业？</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>将删除这些企业及其资产范围配置,不可撤销;删除失败的会逐家提示。</p>
+                <label
+                  htmlFor="batch-delete-assets-opt"
+                  className="flex cursor-pointer items-center gap-2.5 rounded-md border p-3 hover:bg-muted/50"
+                >
+                  <Checkbox
+                    id="batch-delete-assets-opt"
+                    checked={companyBatchAssets}
+                    onCheckedChange={(v) => setCompanyBatchAssets(!!v)}
+                  />
+                  <span className="text-sm leading-snug">
+                    同时删除这些企业下的所有资产
+                    <span className="block text-xs text-muted-foreground">不勾选则保留资产,仅取消归属关系</span>
+                  </span>
+                </label>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={companyBatchDeleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void confirmBatchDeleteCompanies();
+              }}
+              disabled={companyBatchDeleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {companyBatchDeleting ? "删除中…" : `确认删除 ${selectedCompanies.size} 家`}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
