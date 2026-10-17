@@ -1412,7 +1412,7 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
+	return writeTool("report_finding", "记录**已确认**的漏洞。收录口径与 src-report-sync 归档标准对齐：只收具体漏洞+可复现验证证据；结论性/过程性产出、安全设备管理面公网直暴、已证伪项、无危害纯信息不登记。severity 定级：critical=严重(命令执行/进他人账号/资金或状态变更)、high=高危(对得上人/密钥凭据过闸/注入出他主体数据/他人未公开正文)、medium=中危。summary 按「漏洞描述」口径：第一人称大白话写做成了啥(有实值举例)，不写复现步骤与伤害清单。name 按「谁的站+做成了啥」起标题(单位/系统名开头)。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id;务必尽量带上(影响同入口合并);留空时系统会从上报文本的 URL 自动锚定"},
 		"evidence":         str("证据/PoC 文本"),

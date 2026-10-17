@@ -4,6 +4,28 @@
 
 ## [Unreleased]
 
+### 报告
+
+#### 修改的功能
+
+- **渗透测试报告（Markdown）对齐 SRC 漏洞报告版式**：`report.Markdown` 每个漏洞一节改为「＃漏洞标题 → 目标网站URL → 漏洞等级（中文）」三行开头，报告器（reporter agent）撰写的详细报告原样嵌入；节点缺详细报告时回退摘要+证据。配套：`update_finding_report` / `report_finding` 工具描述与 reporter 默认提示词改写为 vuln-report-format 版式（8 块结构、标签行、raw 请求整包+「回包：」、全角＃排版、定级与 vulnclass 词表），已有实例的 reporter 提示词自动升级新版本（版本历史保留）。渲染层内置确定性 curl→raw HTTP 转换：证据/详细报告里的 `$ curl …` 命令（含反斜杠续行）逐条转成 raw 请求整包，紧随的「→ …」行转成回包摘要，报告不再出现 curl 命令形式。
+
+### 技能
+
+#### 新增的功能
+
+- **SRC 挖洞方法论技能 `src-method-pack`**：随发行版装入 `skills/src-method-pack/`（SKILL.md + 短系统提示.md + rules/ + 知识库/ + human-writing/，Person-Pentest 运行副本模式安装）。SRC 黑盒挖洞 + 白盒 0day 审计全流程方法论，含安全红线（越权最小伤害/禁登出/CORS 不挖/证明即停/禁 DoS 等）、自由跳节奏（种子闭环/种子队列）、「对得上再开」模块路由与中文 SRC 知识库。正文 `{包根}` 已物化为本机绝对路径，`适配.md` 落盘口径对齐 Artex 任务工作目录（`data/tasks/<taskID>`，四类分夹直接建在任务工作目录下，不再嵌套任务根）。默认对 `mainagent`/`worker`/`pentest`/`auto`/`planner`/`worker.intranet` 可见（技能页可按 agent 关闭）。
+- **SRC 报告增量整理技能 `src-report-sync`**：随发行版装入 `skills/src-report-sync/`。扫描挖洞任务「报告」目录做 SHA-256 对账，有变化才按五段模板手工撰写 vault 报告并更新总览与 manifest；脚本参数化（`python3 scripts/scan_manifest.py <扫描根>`），无 manifest 时按首次初始化处理（全部源报告视为 NEW），Linux 路径归一化不再整体小写。Artex 部署配置：扫描根 `data/tasks`（覆盖全部任务工作目录）、vault `data/SRC报告/`。默认对 `auto`/`pentest`/`reporter` 可见。
+- **任务模板与技能打通**：全部内置任务模板的「技能结合」条款指向 `src-method-pack`（起手经 Skill 工具加载、安全红线与平台拦截规则取更严、按专项模块路由知识库、报告只认 vuln-report-format 并落任务工作目录 `报告/`），`src-report-sync` 负责后续对账归档——挖洞产出与报告归档在同一条数据链上。
+
+### 任务
+
+#### 新增的功能
+
+- **独立的任务模板管理页**：侧边栏「任务」下方新增「任务模板」入口（`/function/task-templates`），左侧列表（支持按名称/描述/目标搜索）与右侧编辑器并排，可直接新建、编辑、删除模板，并显示每条的更新时间与未保存改动提示；原先只能在「新建任务」抽屉里就地维护的限制解除，新建任务表单的模板选择处保留原入口并加了跳转链接。
+- **内置渗透测试场景模板**：首次启动自动写入 7 条渗透向预置模板（外部 Web 渗透测试、API 越权专项、外网打点转内网纵深、内网渗透（已有立足点）、漏洞复现与验证、资产面测绘与攻击面梳理、白盒 0day 审计）。描述统一采用「目标/类型/背景/要求」占位符结构，目标写明可验证的交付标准，新建任务时选中即可填入。种子以 `task_templates_builtin_v1` 设置标记做一次性写入，用户后续改名、修改或删除都不会在重启时被复活。
+- **模板内置范围锁定与收录口径**：7 条模板统一加「范围与授权（必读）」段——{授权目标清单}/{排除范围} 双占位符、子域与关联资产先归属验证（DNS/证书 SAN/ICP/WHOIS）才入范围并调用 add_task_scope 登记、清单外与第三方只记录不攻击、同 IP/相似域名从严判定；「漏洞收录口径（必读）」段与 `src-report-sync` 归档标准对齐——只收具体漏洞+可复现证据、不收结论性/设备直暴/已证伪项、定级 critical=严重…low=低危、vulnclass 固定词表（SQL注入/XSS/越权/未授权访问/信息泄露/认证缺陷/SSRF/RCE/命令注入/文件操作/反序列化/逻辑漏洞/组件漏洞/弱口令）。平台 `roe_enforcement` 随之收紧为 `strict`（原 warn），越界的会话/隧道/反弹面会被直接阻断。
+
 ### Web
 
 #### 修复的问题

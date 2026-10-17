@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import Link from "next/link";
+
 import { LibraryIcon, PlusIcon, SaveIcon, Settings2Icon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
@@ -420,7 +422,13 @@ export function TaskTemplateControls({
             </ComboboxList>
           </ComboboxContent>
         </Combobox>
-        <FieldDescription>选择后会复制模板的描述和目标，不与模板保持关联。</FieldDescription>
+        <FieldDescription>
+          选择后会复制模板的描述和目标，不与模板保持关联；批量维护见
+          <Link prefetch={false} href="/function/task-templates" className="ml-1 underline underline-offset-4">
+            任务模板
+          </Link>
+          。
+        </FieldDescription>
       </Field>
 
       <AlertDialog
