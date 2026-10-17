@@ -30,6 +30,27 @@ const (
 	deviceProbeCmd   = "id" // probe 往返用 exec 跑的最小无害命令
 )
 
+// taskReverse 判定任务是否为逆向任务(worker.reverse 提示词变体的开关):
+// 按 description/goal 关键词命中(逆向/反编译/脱壳/APK/DEX/SO/wxapkg/固件/算法还原
+// /加密还原/协议还原)。误判后果轻(仅切换提示词变体,能力不受限);worker 每次
+// run 现查,任务描述修改即时生效;读取失败按普通任务处理(不误切)。
+func (s *Server) taskReverse(taskID int64) bool {
+	if taskID <= 0 || s.m == nil || s.m.pg == nil {
+		return false
+	}
+	t, err := s.m.pg.GetTask(taskID)
+	if err != nil || t == nil {
+		return false
+	}
+	text := t.Description + "\n" + t.Goal
+	for _, kw := range []string{"逆向", "反编译", "脱壳", "apk", "apk包", "dex", "so文件", "wxapkg", "小程序包", "固件", "算法还原", "加密还原", "协议还原", "样本分析"} {
+		if strings.Contains(strings.ToLower(text), strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
 // auditDevices 打设备人工操作审计日志(操作者/来源地址/动作明细)。
 func (s *Server) auditDevices(r *http.Request, format string, args ...any) {
 	op := "unknown"

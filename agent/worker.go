@@ -91,6 +91,11 @@ type Worker struct {
 	// variant + code-owned 内网红线尾. Read per run so tunnel/session state
 	// changes take effect without rebuilding the agent. nil = 外网(默认)。
 	intranetFn func(taskID int64) bool
+	// reverseFn resolves whether a task is a sample-reverse task(逆向/安卓逆向,
+	// 按 description/goal 关键词判定), switching the worker prompt to the
+	// worker.reverse variant + 逆向红线尾. 与 intranetFn 同款 per-run 读取;
+	// 逆向优先于内网(逆向任务的立足点语义不适用)。nil = 普通任务。
+	reverseFn func(taskID int64) bool
 	// uaFn resolves this task's稳定分配的客户端 UA(批 5 B4,settings web_ua_pool,
 	// hash(taskID) % len(pool))。Read per run;nil/空 = 不注入 ARTEX_UA。
 	uaFn func(taskID int64) string
@@ -145,6 +150,14 @@ func (w *Worker) SetIntranetResolver(fn func(taskID int64) bool) { w.intranetFn 
 
 func (w *Worker) intranetForTask(taskID int64) bool {
 	return w.intranetFn != nil && w.intranetFn(taskID)
+}
+
+// SetReverseResolver wires a resolver deciding whether a task is a
+// sample-reverse task (worker.reverse 提示词变体). nil/unset = 普通任务。
+func (w *Worker) SetReverseResolver(fn func(taskID int64) bool) { w.reverseFn = fn }
+
+func (w *Worker) reverseForTask(taskID int64) bool {
+	return w.reverseFn != nil && w.reverseFn(taskID)
 }
 
 // SetUAResolver wires a resolver returning the task's稳定分配的客户端 UA
@@ -307,11 +320,34 @@ const workerIntranetDefaultTmpl = workerDefaultTmpl + `
 
 ` + workerIntranetDiscipline
 
+// workerReverseDiscipline 是逆向任务(样本逆向/安卓逆向)的变体纪律段:
+// 证据口径从 HTTP 链换成 可定位/对拍,补设备通道与样本登记约定。
+const workerReverseDiscipline = `
+━━ 逆向期纪律(worker.reverse 变体)━━
+本任务以样本逆向为主(APK/DEX/SO/wxapkg/固件/混淆产物),与 Web 渗透的取证口径不同:
+- **证据口径**:结论落到 文件:行 / 方法签名+地址 / frida 脚本输出 / 对拍向量;HTTP 流量证据链不适用时,以设备侧落地文件、脚本输出、算法对拍结果为等价证明,写进 report_finding 的 evidence;
+- **起手解锁**:反编译/反汇编类工作先调用 Skill 加载 rea 技能解锁 REA 工具集(Ghidra/JADX/apktool 桥);方法论路由 chains-rev / chains-app;
+- **样本登记**:首个意图把样本(路径 + sha256 + 类型 + 来源)写入任务工作目录 README 索引;后续发现的 evidence 引用样本哈希,保证版本可溯;
+- **设备通道**(安卓样本):交互前 list_devices 判活,无响应提示操作者唤醒 DroidBridge;device_exec 长命令分步执行,注意单次 run 墙钟预算;
+- **产出口径**:算法=伪代码+参数+测试向量;协议=字段表+样例;密钥=位置+用途+影响;说不出位置的判断标 inferred。
+`
+
+// worker 默认正文 + 逆向纪律段,同 worker.intranet 的种子结构。
+const workerReverseDefaultTmpl = workerDefaultTmpl + `
+
+` + workerReverseDiscipline
+
 // workerIntranetRules 是内网期的代码固定尾(不可被 DB 正文覆盖):与
 // untrustedDataRule 等同级的红线提醒,保证编辑正文也删不掉内网纪律。
 const workerIntranetRules = `
 
 **内网红线(不可编辑)**:授权边缘以 task_scope 为准——scope 外网段只在人工批准( pending_scope → 扩 scope )后才可触碰;被动侦察优先、隧道四件套进出、注意动静控制。`
+
+// workerReverseRules 是逆向任务的代码固定尾(不可被 DB 正文编辑覆盖):
+// 授权样本边界与产出物不出任务目录。
+const workerReverseRules = `
+
+**逆向红线(不可编辑)**:只分析授权交付的样本;除对拍验证必需的本地构造外,不对任何线上系统发起请求;还原出的密钥/算法仅用于授权测试,不外传、不留出任务工作目录;设备侧写操作注意 OPSEC。逆向类 vulnclass 允许:硬编码密钥、弱加密实现、校验绕过(其余沿用固定词表)。`
 
 // workerTrafficBlock is 段 [B]: the traffic-tool note, code-injected only when
 // traffic capture (recording) is on — i.e. the traffic_* tools actually exist.
@@ -356,11 +392,16 @@ func ensureRunDir(base string, taskID, intentID int64) string {
 // cmdOutDir is the SDK large-tool-output spill dir under an agent's run dir.
 func cmdOutDir(dir string) string { return filepath.Join(dir, "cmd-output") }
 
-func workerSystem(proxyAddr, caCert, dataDir, runDir string, intranet bool) string {
+func workerSystem(proxyAddr, caCert, dataDir, runDir string, intranet, reverse bool) string {
 	vars := WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr(), Intranet: intranet}
 	body := renderSystem("worker", workerDefaultTmpl, vars)
 	tail := ""
-	if intranet {
+	if reverse {
+		// 逆向任务:正文换 "worker.reverse" 变体(无 DB 覆盖时退回 worker 链),
+		// 追加代码固定逆向红线尾。优先于内网变体:逆向任务的立足点语义不适用。
+		body = renderSystemVariant("worker", "reverse", workerDefaultTmpl, vars)
+		tail = workerReverseRules
+	} else if intranet {
 		// 内网期:正文换 "worker.intranet" 变体(无 DB 覆盖时退回 worker 链),
 		// 并追加代码固定内网红线尾(不可被 DB 正文编辑掉)。
 		body = renderSystemVariant("worker", "intranet", workerDefaultTmpl, vars)
@@ -477,7 +518,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	sysBody := workerSystem(proxyAddr, proxyCA, w.workDir, runDir, w.intranetForTask(taskID))
+	sysBody := workerSystem(proxyAddr, proxyCA, w.workDir, runDir, w.intranetForTask(taskID), w.reverseForTask(taskID))
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}

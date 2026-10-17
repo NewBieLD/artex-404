@@ -50,7 +50,7 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	PromptOverride = func(k string) (string, bool) {
 		return "{{if .ProxyAddr}}走代理 {{.ProxyAddr}}{{else}}手动{{end}}", true
 	}
-	recording := workerSystem("127.0.0.1:8080", "/ca.pem", "/data", "/data", false)
+	recording := workerSystem("127.0.0.1:8080", "/ca.pem", "/data", "/data", false, false)
 	if !strings.HasPrefix(recording, "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker proxy branch body: %q", recording)
 	}
@@ -65,14 +65,14 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	}
 	// Egress proxy set but capture OFF (no CA): the ProxyAddr template branch still
 	// renders, but the trafficTool block must NOT — those tools are not registered.
-	egressOnly := workerSystem("127.0.0.1:8080", "", "/data", "/data", false)
+	egressOnly := workerSystem("127.0.0.1:8080", "", "/data", "/data", false, false)
 	if !strings.HasPrefix(egressOnly, "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker egress-only branch body: %q", egressOnly)
 	}
 	if strings.Contains(egressOnly, "traffic_search") {
 		t.Fatalf("worker without recording must NOT inject trafficTool: %q", egressOnly)
 	}
-	noProxy := workerSystem("", "", "/data", "/data", false)
+	noProxy := workerSystem("", "", "/data", "/data", false, false)
 	if !strings.HasPrefix(noProxy, "手动") {
 		t.Fatalf("worker no-proxy branch body: %q", noProxy)
 	}
@@ -88,7 +88,7 @@ func TestWorkerSystemIntranetVariant(t *testing.T) {
 
 	// 无 DB 覆盖:退回 worker 默认正文 + 内网红线尾。
 	PromptOverride = nil
-	got := workerSystem("", "", "/data", "/data", true)
+	got := workerSystem("", "", "/data", "/data", true, false)
 	if !strings.Contains(got, "内网红线") {
 		t.Fatalf("intranet run missing code-owned 内网红线尾: %q", got)
 	}
@@ -103,7 +103,7 @@ func TestWorkerSystemIntranetVariant(t *testing.T) {
 		}
 		return "", false
 	}
-	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(got, "内网正文 true") {
+	if got = workerSystem("", "", "/data", "/data", true, false); !strings.HasPrefix(got, "内网正文 true") {
 		t.Fatalf("worker.intranet override should win: %q", got)
 	}
 	if !strings.Contains(got, "内网红线") {
@@ -116,11 +116,11 @@ func TestWorkerSystemIntranetVariant(t *testing.T) {
 		}
 		return "", false
 	}
-	if got = workerSystem("", "", "/data", "/data", true); !strings.HasPrefix(got, "外网正文") {
+	if got = workerSystem("", "", "/data", "/data", true, false); !strings.HasPrefix(got, "外网正文") {
 		t.Fatalf("missing variant should fall back to worker key: %q", got)
 	}
 	// intranet=false 不追加红线尾。
-	if got = workerSystem("", "", "/data", "/data", false); strings.Contains(got, "内网红线") {
+	if got = workerSystem("", "", "/data", "/data", false, false); strings.Contains(got, "内网红线") {
 		t.Fatalf("non-intranet run must not append 内网红线尾: %q", got)
 	}
 }

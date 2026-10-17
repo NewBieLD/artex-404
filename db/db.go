@@ -222,6 +222,13 @@ var builtinAgents = []builtinAgent{
 		{"WorkerName", "worker 自我标识(可选)", "worker-1", "runtime"},
 		{"Intranet", "是否内网期(有立足点会话/活跃隧道)", "true", "runtime"},
 	}, false, nil},
+	// worker.reverse:逆向任务变体——样本逆向/安卓逆向任务的 DB 覆盖槽位
+	//(server.taskReverse 按 description/goal 关键词判定切换)。
+	{"worker.reverse", "执行·逆向", "worker", "worker 的逆向任务提示词变体：任务以样本逆向为主(按描述/目标关键词判定)时代替 worker 正文。", []promptVar{
+		{"ProxyAddr", "记录代理地址(驱动 if 双文案)", "127.0.0.1:8080", "runtime"},
+		{"WorkerName", "worker 自我标识(可选)", "worker-1", "runtime"},
+		{"Intranet", "是否内网期(有立足点会话/活跃隧道)", "false", "runtime"},
+	}, false, nil},
 	// Auto:内置「平台操作」agent。不参与渗透编排循环,经对话页驱动,用工具操作平台。
 	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
 	// 渗透测试:内置「独立渗透」agent。经对话页驱动,一人从侦察到收尾走完整条渗透链,自己规划自己执行自己验证。默认开启交互式 shell。

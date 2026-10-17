@@ -53,7 +53,7 @@ func TestSystemPromptMetaRules(t *testing.T) {
 	if !strings.Contains(p, "meta 铁律(反问纪律,全程在场)") {
 		t.Fatal("plannerSystem 缺 planner 版 meta 铁律")
 	}
-	w := workerSystem("", "", "/data", "/data", false)
+	w := workerSystem("", "", "/data", "/data", false, false)
 	if !strings.Contains(w, "meta 铁律(观测真伪与卡住自检)") {
 		t.Fatal("workerSystem 缺 worker 版 meta 铁律")
 	}

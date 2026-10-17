@@ -145,7 +145,10 @@ func BuiltinPromptSeeds() map[string]string {
 		// 正文,见 worker.go workerSystem)。key 带 ".intranet" 后缀,seedBuiltins
 		// 里有同名 agents 行(db/db.go),seedPrompts 才能把正文种进 agent_prompts。
 		"worker.intranet": workerIntranetDefaultTmpl,
-		"auto":            autoDefaultTmpl,
-		"pentest":         pentestDefaultTmpl,
+		// worker.reverse:逆向任务变体(样本逆向/安卓逆向,server.taskReverse
+		// 关键词判定切换)。同款后缀约定:db.go seedBuiltins 需有同名行。
+		"worker.reverse": workerReverseDefaultTmpl,
+		"auto":           autoDefaultTmpl,
+		"pentest":        pentestDefaultTmpl,
 	}
 }
