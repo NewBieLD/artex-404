@@ -13,6 +13,7 @@ import {
   InfoIcon,
   SearchIcon,
   ShieldAlertIcon,
+  Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -20,6 +21,16 @@ import { toast } from "sonner";
 import { FindingRetestDialog } from "@/components/finding-retest-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -731,6 +742,46 @@ export default function FindingsPage() {
     setDeepenDescription("");
   }, []);
 
+  // 批量删除(选择集):确认弹窗 → 单请求删整批,失败条目逐条回报;三视图与统计全刷新。
+  const [batchDeleteOpen, setBatchDeleteOpen] = React.useState(false);
+  const [batchDeleting, setBatchDeleting] = React.useState(false);
+  const confirmBatchDelete = React.useCallback(async () => {
+    if (batchDeleting) return;
+    const ids = [...selectedIds].map((v) => Number(v)).filter((v) => Number.isInteger(v) && v > 0);
+    if (ids.length === 0) {
+      setBatchDeleteOpen(false);
+      return;
+    }
+    setBatchDeleting(true);
+    try {
+      const r = await api.findingsBatchDelete(ids);
+      const dead = new Set(ids.map(String));
+      for (const f of r.failed ?? []) dead.delete(String(f.id));
+      setFindings((cur) => cur.filter((x) => !dead.has(String(x.finding_id))));
+      setSelectedIds(new Set());
+      setTotal((t) => Math.max(0, t - dead.size));
+      setFlat((cur) => ({ ...cur, total: Math.max(0, cur.total - dead.size) }));
+      setBatchDeleteOpen(false);
+      toast.success(`已删除 ${r.deleted} 条漏洞`);
+      if ((r.failed ?? []).length > 0) {
+        toast.warning(`${r.failed.length} 条失败(不存在或删除出错),已刷新列表`);
+      }
+      api
+        .findingStats()
+        .then(setStats)
+        .catch(() => {
+          // 删除本身仍有效,统计刷新失败不影响。
+        });
+      void loadFlat();
+      if (view === "asset") void loadAssetTree();
+      if (view === "grouped") void refreshGroups();
+    } catch (e) {
+      toast.error(`批量删除失败：${(e as Error).message}`);
+    } finally {
+      setBatchDeleting(false);
+    }
+  }, [batchDeleting, selectedIds, setFindings, view, loadFlat, loadAssetTree, refreshGroups]);
+
   async function submitDeepen() {
     if (!deepenFinding?.finding_id || !deepenDescription.trim() || deepening) return;
     setDeepening(true);
@@ -952,6 +1003,18 @@ export default function FindingsPage() {
           <div className="ml-auto flex items-center gap-3">
             {selectedIds.size > 0 && (
               <span className="text-xs text-muted-foreground tabular-nums">已选 {selectedIds.size} 条</span>
+            )}
+            {selectedIds.size > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1 text-red-600 hover:text-red-600"
+                title="删除全部选中漏洞(二次确认)"
+                onClick={() => setBatchDeleteOpen(true)}
+              >
+                <Trash2Icon className="size-3.5" />
+                批量删除
+              </Button>
             )}
             <Button size="sm" variant="outline" onClick={openExport}>
               <DownloadIcon /> 导出
@@ -1258,6 +1321,31 @@ export default function FindingsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 批量删除确认:destructive,删的是跨任务漏洞本体(含证据绑定),不可撤销 */}
+      <AlertDialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除选中的 {selectedIds.size} 条漏洞？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将删除这些漏洞记录及其关联证据绑定,跨任务生效,此操作不可撤销。删除失败的条目会在完成后逐条提示。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={batchDeleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={batchDeleting}
+              onClick={(e) => {
+                e.preventDefault();
+                void confirmBatchDelete();
+              }}
+            >
+              {batchDeleting ? "删除中…" : `确认删除 ${selectedIds.size} 条`}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

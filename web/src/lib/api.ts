@@ -665,6 +665,11 @@ export const api = {
   ) => patch<Finding>(`/exploration/findings/${id}`, fields),
   // 删除漏洞:移除 findings 记录 + 来源探索节点(从发现列表/任务发现 Tab/探索图一并消失)。
   deleteFinding: (id: string) => del<{ deleted: boolean; id: number }>(`/exploration/findings/${id}`),
+  // 批量删除(选择集,单次上限 500):失败逐条回报,不中断整批。
+  findingsBatchDelete: (ids: number[]) =>
+    post<{ deleted: number; failed: { id: number; error: string }[] }>(`/exploration/findings/batch-delete`, {
+      ids,
+    }),
   findingRetests: (id: string) =>
     get<{ retests: FindingRetest[] }>(`/exploration/findings/${encodeURIComponent(id)}/retests`).then((r) =>
       arr(r.retests),

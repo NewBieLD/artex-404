@@ -815,6 +815,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/exploration/findings/{id}/checks", s.startFindingCheck)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("DELETE /api/exploration/findings/{id}", s.deleteFinding)
+	mux.HandleFunc("POST /api/exploration/findings/batch-delete", s.batchDeleteFindings)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/activity", s.activity)
@@ -2435,6 +2436,44 @@ func (s *Server) deleteFinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deleted": true, "id": id})
+}
+
+// batchDeleteFindings 批量删除漏洞(发现页跨任务汇总的选择集):逐条走
+// DeleteFinding 的事务路径,失败逐条回报不中断整批;单次上限 500。
+func (s *Server) batchDeleteFindings(w http.ResponseWriter, r *http.Request) {
+	var a struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
+		writeErr(w, 400, "请求体 JSON 解析失败: "+err.Error())
+		return
+	}
+	if len(a.IDs) == 0 {
+		writeErr(w, 400, "ids 为空")
+		return
+	}
+	if len(a.IDs) > 500 {
+		writeErr(w, 400, fmt.Sprintf("单次批量上限 500 条,当前 %d", len(a.IDs)))
+		return
+	}
+	deleted := 0
+	failed := []map[string]any{}
+	for _, id := range a.IDs {
+		if id <= 0 {
+			failed = append(failed, map[string]any{"id": id, "error": "bad id"})
+			continue
+		}
+		n, err := s.m.pg.DeleteFinding(id)
+		switch {
+		case err != nil:
+			failed = append(failed, map[string]any{"id": id, "error": err.Error()})
+		case n == 0:
+			failed = append(failed, map[string]any{"id": id, "error": "not found"})
+		default:
+			deleted++
+		}
+	}
+	writeJSON(w, 200, map[string]any{"deleted": deleted, "failed": failed})
 }
 
 func (s *Server) intents(w http.ResponseWriter, r *http.Request) {
