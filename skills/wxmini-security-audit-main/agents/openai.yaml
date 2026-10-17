@@ -1,0 +1,7 @@
+interface:
+  display_name: "WxMini Audit"
+  short_description: "微信小程序全流程静态安全审计主编排入口"
+  default_prompt: "Use $wxmini-security-audit to run the full static audit workflow for a WeChat Mini Program and route each phase to the dedicated wxmini-agent subskills."
+
+policy:
+  allow_implicit_invocation: true
