@@ -49,6 +49,7 @@ func (s *Server) hostTools() ([]actool.CoreTool, map[string][]string) {
 	tools = append(tools, s.credentialTools()...) // 凭据工具(期 2),默认绑 worker
 	tools = append(tools, s.tunnelTools()...)    // 隧道四件套(期 3a),默认绑 worker
 	tools = append(tools, s.reverseTools()...)   // 反弹监听(期 5),默认绑 worker
+	tools = append(tools, s.deviceTools()...)    // Android 反连设备判活(判活期 1),默认绑 worker
 	custom, err := s.customTools()
 	if err != nil {
 		log.Printf("[custom-tool] 加载失败: %v", err)
@@ -432,7 +433,7 @@ func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
 // task-agnostic, so this host tool needs no task_id / exploration store.
 func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 	return wrTool("update_finding_report",
-		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。报告建议包含:漏洞概述、影响与危害、复现步骤、证据/PoC、修复建议。",
+		"为已登记的漏洞写入/更新【详细报告】(Markdown 全文,整段覆盖旧内容)。finding_id 传 report_finding 返回的那个 id(\"finding recorded: <id>\" 里的数字)。版式必须严格遵循漏洞报告格式(与 src-report-sync 归档标准一致)：首块标题三行(＃漏洞标题一行=单位/系统名+做成了啥、目标网站URL：…、漏洞等级：严重/高危/中危)，随后标签段「漏洞描述：」第一人称大白话、「漏洞危害：」每种伤害单独一行、「涉及接口清单」1、2、3、「复现步骤」每步 raw 请求整包+「回包：」实际回包、「修复建议」，大块之间全角＃分隔。完整规范见 /home/lotso/artex-ymh/skills/src-method-pack/rules/vuln-report-format.md。",
 		objSchema(map[string]any{
 			"finding_id":       map[string]any{"type": "integer", "description": "目标漏洞 id(report_finding 返回的 id)"},
 			"report":           strParam("详细报告全文,Markdown 格式"),

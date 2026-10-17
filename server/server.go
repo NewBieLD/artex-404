@@ -54,6 +54,8 @@ type Server struct {
 	credStore *db.CredentialStore // 凭据落库访问层(期 2,secret AES-GCM,与 sessions 不同域标签)
 	tunnels   *tunnel.Manager     // 多层代理隧道(期 3a,见 tunnel.go);nil = DB 未就绪
 	reverse   *PenelopeHandler    // 反弹 shell handler(期 5,见 reverse.go);nil = DB 未就绪
+	devStore  *db.DeviceStore     // Android 反连设备落库层(判活期 1,见 devices.go);nil = DB 未就绪
+	devGW     *DeviceGateway      // DroidBridge 反连 WS 网关(判活期 1,见 droidgateway.go);nil = DB 未就绪
 	tickets   sseTicketStore      // SSE 一次性票据(F6,见 auth.go),零值可用
 	authkv    authKV              // auth 持久层注入(测试用);nil = 走 m.pg
 
@@ -160,10 +162,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
-		provByProfile: map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
+		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	s.initSideQuestions()
-	s.initStage(dataDir) // 受管文件投递暂存(F13);失败降级为关闭,不影响启动
+	s.initStage(dataDir)        // 受管文件投递暂存(F13);失败降级为关闭,不影响启动
 	checkToolsManifest(dataDir) // 期 6 外部工具清单自检(缺失常态,只打汇总日志)
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
@@ -244,6 +246,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		s.seedTunnelTools()        // 隧道工具 seed 进 tools 表(默认绑 worker)
 		s.initReverse(dataDir)     // 期 5 反弹 handler:penelope 受管进程 + 上期 reverse 会话诚实标 dead
 		s.seedReverseTools()       // reverse_listen 工具 seed 进 tools 表(默认绑 worker)
+		s.initDevices()            // 判活期 1 Android 设备:落库层 + 反连网关 + 独立监听(ARTEX_DEVICE_LISTEN)
+		s.seedDeviceTools()        // list_devices/probe_device 工具 seed 进 tools 表(默认绑 worker)
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
@@ -757,8 +761,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/scope", s.taskScopeList)
 	mux.HandleFunc("POST /api/tasks/{id}/scope", s.taskScopeAdd)
 	mux.HandleFunc("DELETE /api/tasks/{id}/scope/{sid}", s.taskScopeDelete)
-	mux.HandleFunc("GET /api/tasks/{id}/pending-scope", s.pendingScopeList)   // 期 4:待授权网段列表
-	mux.HandleFunc("POST /api/pending-scope/{id}/decide", s.pendingScopeDecide) // 期 4:审批扩 scope
+	mux.HandleFunc("GET /api/tasks/{id}/pending-scope", s.pendingScopeList)        // 期 4:待授权网段列表
+	mux.HandleFunc("POST /api/pending-scope/{id}/decide", s.pendingScopeDecide)    // 期 4:审批扩 scope
 	mux.HandleFunc("GET /api/tasks/{id}/goals", s.listGoals)                       // 目标管理:列出本任务全部目标
 	mux.HandleFunc("POST /api/tasks/{id}/goals", s.addGoal)                        // 目标管理:人工新增目标(复活任务)
 	mux.HandleFunc("PATCH /api/tasks/{id}/goals/{gid}", s.editGoal)                // 目标管理:修改目标(复活任务)
@@ -980,6 +984,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tunnels/{id}/teardown", s.intranetTeardownTunnel)
 	mux.HandleFunc("GET /api/credentials", s.intranetListCredentials)
 	mux.HandleFunc("GET /api/intranet/topology", s.intranetTopology)
+
+	// Android 反连设备(判活期 1):管理 API 在 JWT 后(与 intranet.go 同隔离取向,
+	// agent 通道走 list_devices/probe_device host 工具);设备反连在独立监听口
+	// (ARTEX_DEVICE_LISTEN,默认 127.0.0.1:8791),鉴权=登记 token,不过门控/JWT
+	//(手机拿不到 gate cookie;安全靠 24 字节随机 token + 一致性 401)。
+	mux.HandleFunc("GET /api/devices", s.devicesList)
+	mux.HandleFunc("POST /api/devices", s.devicesEnroll)
+	mux.HandleFunc("POST /api/devices/listen", s.devicesListenSet) // 字面路由,优先于 {id} 模式
+	mux.HandleFunc("GET /api/devices/listen", s.devicesListenGet)
+	mux.HandleFunc("GET /api/devices/{id}/qr", s.devicesQR) // 一次性 ticket 鉴权(<img> 直连)
+	mux.HandleFunc("POST /api/devices/{id}/reveal", s.devicesReveal)
+	mux.HandleFunc("POST /api/devices/{id}/probe", s.devicesProbe)
+	mux.HandleFunc("DELETE /api/devices/{id}", s.devicesDelete)
 
 	// /api/* goes through CORS + JWT; everything else is served by the embedded
 	// frontend (public — auth is enforced client-side and on the API). With the
@@ -3695,9 +3712,19 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 			counts[ty] = len(ns)
 		}
 	}
+	// findings 表的详细报告(reporter/update_finding_report 按 vuln-report-format 版式
+	// 撰写)按节点 id 带给渲染器;每个漏洞一节原样嵌入。
+	reports := map[int64]string{}
+	if dbfs, err := s.m.pg.ListFindingsForExport(db.FindingFilter{TaskID: t.ID}, nil); err == nil {
+		for _, f := range dbfs {
+			if f.NodeID != nil && f.Report != "" {
+				reports[*f.NodeID] = f.Report
+			}
+		}
+	}
 	md := report.Markdown(report.Input{
 		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
-		AssetCounts: counts, Findings: findings,
+		AssetCounts: counts, Findings: findings, Reports: reports,
 	})
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.WriteHeader(200)

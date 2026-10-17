@@ -1590,3 +1590,54 @@ export interface InterceptExecution {
   seq: number;
   items: Activity[];
 }
+
+// ---- Android 反连设备（DroidBridge 判活期 1）----
+
+/** GET /api/devices 的设备台账行（含网关运行态判活投影）。 */
+export interface DroidDevice {
+  id: number;
+  /** DroidBridge APK 自生成，首次 hello 绑定；未绑定为空串。 */
+  device_id: string;
+  name: string;
+  model: string;
+  android_version: string;
+  sdk_int: number;
+  rooted: boolean;
+  /** DB 持久状态：online / offline（重启即全 offline）。 */
+  status: string;
+  /** 运行态合成：online（在线且心跳正常）/ unresponsive（45s 无帧）/ offline。 */
+  state: string;
+  online: boolean;
+  stale: boolean;
+  /** 距最后一帧的毫秒数（在线时有效）。 */
+  idle_ms?: number;
+  /** 预留：多节点部署归属节点。 */
+  node_id: number;
+  last_seen: string;
+  created_at: string;
+}
+
+/** POST /api/devices 登记结果：token 明文仅本次返回。 */
+export interface DeviceEnrollResult {
+  id: number;
+  name: string;
+  token: string;
+  ws_url: string;
+  hint: string;
+}
+
+/** POST /api/devices/{id}/probe 人工判活结果。 */
+export interface DeviceProbeResult {
+  alive: boolean;
+  ms: number;
+  device_id: string;
+  stdout?: string;
+  error?: string;
+}
+
+/** 反连监听状态（GET/POST /api/devices/listen）。 */
+export interface DeviceListenInfo {
+  host: string;
+  port: number;
+  enabled: boolean;
+}

@@ -1354,3 +1354,29 @@ CREATE INDEX IF NOT EXISTS idx_tunnels_state ON tunnels(state);
 -- honeypot_evidence: 命中签名证据,JSON 数组文本(如 ["cowrie_default_ssh_banner(Cowrie, 0.99)"]),合并去重。
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS honeypot_score REAL NOT NULL DEFAULT 0;
 ALTER TABLE assets ADD COLUMN IF NOT EXISTS honeypot_evidence TEXT NOT NULL DEFAULT '';
+
+-- =====================================================================
+-- N. Android 反连设备台账(DroidBridge 判活期 1,仿 sessions §J)
+-- =====================================================================
+-- 一台登记设备 = 一条 24 字节随机 token(sha256 查表鉴权 + AES-GCM 密文重显,
+-- 与 sessions/credentials 同一套 gcm1: 格式,域分离标签见 db/devices.go)。
+-- device_id 由 DroidBridge APK 自生成,首次 hello 时绑定到 token 行;
+-- status 只存 online/offline(重启即全量 offline,诚实不装活),
+-- 「无响应」(45s 无帧)是网关运行态,不落库。node_id 预留多节点部署。
+CREATE TABLE IF NOT EXISTS devices (
+    id              BIGSERIAL PRIMARY KEY,
+    device_id       TEXT NOT NULL DEFAULT '',    -- DroidBridge hello 上报的 deviceId(首连绑定)
+    name            TEXT NOT NULL DEFAULT '',    -- 操作者命名(登记时可填)
+    model           TEXT NOT NULL DEFAULT '',
+    android_version TEXT NOT NULL DEFAULT '',
+    sdk_int         INT  NOT NULL DEFAULT 0,
+    rooted          BOOLEAN NOT NULL DEFAULT false,
+    token_hash      TEXT NOT NULL UNIQUE,        -- sha256(token) hex,反连鉴权查这张
+    token_enc       TEXT NOT NULL DEFAULT '',    -- gcm1:<b64> AES-GCM(token),设备页重显
+    status          TEXT NOT NULL DEFAULT 'offline' CHECK(status IN ('online','offline')),
+    node_id         BIGINT NOT NULL DEFAULT 0,   -- 预留:归属节点(多节点部署)
+    last_seen       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_device_id ON devices(device_id) WHERE device_id <> '';
+CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status);
