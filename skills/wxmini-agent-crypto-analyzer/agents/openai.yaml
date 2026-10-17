@@ -1,0 +1,7 @@
+interface:
+  display_name: "WxMini CryptoAnalyzer"
+  short_description: "微信小程序全局加解密与签名逻辑分析"
+  default_prompt: "Use $wxmini-agent-crypto-analyzer to inspect a mini program codebase, map crypto usage, and write `crypto_analysis.json`."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "WxMini EndpointMiner"
+  short_description: "微信小程序接口智能关联与归一化分析"
+  default_prompt: "Use $wxmini-agent-endpoint-miner to correlate `raw_endpoints.json`, recover meaningful endpoints, and generate `api_endpoints.json`."
+
+policy:
+  allow_implicit_invocation: true

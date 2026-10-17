@@ -1,0 +1,7 @@
+interface:
+  display_name: "WxMini SecretScanner"
+  short_description: "微信小程序敏感信息智能分析"
+  default_prompt: "Use $wxmini-agent-secret-scanner to review `raw_secrets.json`, validate context in source files, and produce `secrets_report.json`."
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,7 @@
+interface:
+  display_name: "WxMini Decompiler"
+  short_description: "微信小程序 Phase 1 反编译与文件资产清单"
+  default_prompt: "Use $wxmini-agent-decompiler to scan a WeChat Mini Program directory, decompile local `.wxapkg` packages when the required tool exists, and write `file_inventory.json`."
+
+policy:
+  allow_implicit_invocation: true

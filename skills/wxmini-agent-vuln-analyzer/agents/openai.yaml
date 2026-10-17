@@ -1,0 +1,7 @@
+interface:
+  display_name: "WxMini VulnAnalyzer"
+  short_description: "微信小程序七大维度漏洞静态分析"
+  default_prompt: "Use $wxmini-agent-vuln-analyzer to inspect a mini program codebase for evidence-backed vulnerabilities and write `vuln_analysis.json`."
+
+policy:
+  allow_implicit_invocation: true

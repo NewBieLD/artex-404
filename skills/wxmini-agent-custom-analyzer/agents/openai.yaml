@@ -1,0 +1,7 @@
+interface:
+  display_name: "WxMini CustomAnalyzer"
+  short_description: "微信小程序定向深度静态分析"
+  default_prompt: "Use $wxmini-agent-custom-analyzer to trace user-specified endpoints, parameters, or Burp clues and produce `custom_analysis.json`."
+
+policy:
+  allow_implicit_invocation: true

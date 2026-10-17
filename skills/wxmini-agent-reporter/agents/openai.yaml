@@ -1,0 +1,7 @@
+interface:
+  display_name: "WxMini Reporter"
+  short_description: "微信小程序审计结果汇总与报告生成"
+  default_prompt: "Use $wxmini-agent-reporter to read completed phase outputs and generate the final mini program security report set."
+
+policy:
+  allow_implicit_invocation: true
