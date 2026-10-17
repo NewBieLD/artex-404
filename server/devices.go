@@ -97,7 +97,75 @@ func (s *Server) deviceTools() []actool.CoreTool {
 	if s.devStore == nil || s.devGW == nil {
 		return nil
 	}
-	return []actool.CoreTool{s.listDevicesTool(), s.probeDeviceTool()}
+	return []actool.CoreTool{s.listDevicesTool(), s.probeDeviceTool(), s.deviceExecTool()}
+}
+
+// deviceExecTool 经反连通道在设备上执行 shell 命令(设备侧能力解锁:DroidBridge
+// exec 帧,APK 侧 asRoot 走 su -c)。输出与会话工具同款 64KB 截断标注。
+func (s *Server) deviceExecTool() actool.CoreTool {
+	return actool.Build(actool.Spec{
+		Name: "device_exec",
+		Description: "在 Android 测试设备(DroidBridge 反连)上执行一条 shell 命令并取回 stdout/stderr。" +
+			"asRoot=true 经 su(root 设备);超时默认 15s、上限 120s;输出超 64KB 截断标注。" +
+			"设备不在线/无响应(45s 无心跳冻结)会明确报因。典型用途:定位/读取小程序 wxapkg、" +
+			"读小程序 storage 提取 token、设备侧诊断。注意 OPSEC:命令在真机执行留痕,写操作慎用。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"device_id": strParam("list_devices 返回的 device_id(或行 id)"),
+				"command":   strParam("要在设备上执行的 shell 命令"),
+				"as_root":   map[string]any{"type": "boolean", "description": "经 su 执行(默认 false)"},
+				"timeout":   map[string]any{"type": "integer", "description": "超时秒数(默认 15,上限 120)"},
+			},
+			"required": []any{"device_id", "command"},
+		},
+		ReadOnly:    func(json.RawMessage) bool { return false },
+		Permissions: devicePerm,
+		Run: func(ctx context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
+			var a struct {
+				DeviceID string `json:"device_id"`
+				Command  string `json:"command"`
+				AsRoot   bool   `json:"as_root"`
+				Timeout  int    `json:"timeout"`
+			}
+			_ = json.Unmarshal(in, &a)
+			if strings.TrimSpace(a.Command) == "" {
+				return actool.Errorf("command 必填"), nil
+			}
+			rec, err := s.lookupDevice(a.DeviceID)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if a.Timeout <= 0 {
+				a.Timeout = 15
+			}
+			if a.Timeout > 120 {
+				a.Timeout = 120
+			}
+			start := time.Now()
+			res, rerr := s.devGW.Request(rec.DeviceID, map[string]any{
+				"t": "exec", "cmd": a.Command, "asRoot": a.AsRoot,
+				"timeoutMs": a.Timeout * 1000,
+			}, time.Duration(a.Timeout+5)*time.Second)
+			if rerr != nil {
+				return actool.Errorf("执行失败:" + rerr.Error()), nil
+			}
+			ms := time.Since(start).Milliseconds()
+			if !res.OK && res.Stdout == "" && res.Stderr == "" {
+				return actool.Errorf(fmt.Sprintf("执行失败(code=%d):%s", res.Code, orDefault(res.Error, "未知错误"))), nil
+			}
+			out := map[string]any{"device_id": rec.DeviceID, "code": res.Code, "ms": ms}
+			out["stdout"] = truncateOutput(res.Stdout)
+			out["stderr"] = truncateOutput(res.Stderr)
+			if len(res.Stdout) > maxSessionToolOutput || len(res.Stderr) > maxSessionToolOutput {
+				out["truncated"] = true
+			}
+			if res.Error != "" {
+				out["error"] = res.Error
+			}
+			return jsonResult(out)
+		},
+	})
 }
 
 // deviceView 把 DB 行 + 网关运行态合成一个投影(工具与 REST 共用)。
