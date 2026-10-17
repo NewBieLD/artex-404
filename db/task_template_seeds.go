@@ -72,6 +72,19 @@ var androidTaskTemplates = []builtinTaskTemplate{
 	},
 }
 
+// wxminiTaskTemplates 是安卓微信小程序渗透模板(独立门控,与 android 集合互不影响)。
+// 与 wxmini-pentest 技能四段链、device_exec 设备通道、e0e1-wx runbook 判据对齐。
+var wxminiTaskTemplates = []builtinTaskTemplate{
+	{
+		name:        "安卓微信小程序渗透测试",
+		description: "目标:{小程序名称 / appid,如 wx1234567890abcdef}\n类型:微信小程序渗透(包体白盒 + 后端接口黑盒)\n测试机:平台登记的 Android 设备(DroidBridge 反连;手机上先打开目标小程序)。\n\n要求:\n- 起手登记:小程序包(路径 + sha256 + 来源)与 appid 写入任务工作目录 README 索引;\n- 拉包:list_devices 判活 → device_exec 定位 appbrand/pkg 最新 wxapkg(主包+分包)→ base64 拉取(>5MB dd 分块并 sha256 对账)→ unpack_wxapkg.py 解包(技能自带脚本);\n- 白盒采集:AppSecret/云开发 env/AK/SK(命中即严重)、API 端点 + app.json 合法域名(**未上线/测试域名常在此泄露**)、路由表、云函数清单、加密实现(有源码直接读)、appid 扩面(范围外只登记不触碰);\n- 鉴权材料:device_exec 读小程序 storage 优先,手机挂 mitm 抓包兜底(顺带做覆盖度对账:抓包端点 ⊆ 静态清单,差集即盲区);\n- 接口测试:按 wxmini-pentest 技能 runbook——认证四态(no/empty/fake/baseline)、IDOR 向量族(含路径 /undefined 与 JWT-in-URL)、云函数未鉴权直调、支付与订单逻辑;高危写操作(真实支付/下单/删除)先停下向操作者确认。\n\n范围与授权(必读):\n- 授权目标:{appid} 及其后端 API 域名 {API 域名清单};排除范围:{排除范围} 绝对不可触碰;\n- appid 扩面发现的关联小程序,仅在同样处于授权范围(或目标方公开收录范围)时才可测,范围外只登记资产;\n- 设备侧操作仅限平台登记的测试设备,不影响设备正常使用。\n\n漏洞收录口径(必读,与 src-report-sync 归档标准对齐):\n- 只收「具体漏洞 + 可复现验证证据」:report_finding 的 evidence 必须含最小验证请求与关键回显(或差值、设备侧落地文件、调用链 PoC 等等价证明);\n- 不收:结论性/过程性产出、已证伪项、无危害纯信息——写入任务工作目录排除记录,不调 report_finding;\n- 定级按实际影响,不确定宁低勿高;vulnclass 用固定词表(逆向场景允许追加:硬编码密钥、弱加密实现、校验绕过),不自造类别名。\n\n技能结合(必读):\n- 起手调用 Skill 加载 `wxmini-pentest`(四段链/一句话流程/红线),静态流水线用 wxmini-agent 七件套;加密还原/混淆按 chains-app 决策链;需要 Ghidra/JADX 工具集时调用 rea 技能解锁;起手加载 `src-method-pack` 读「安全红线 1~11」;\n- 正式报告逐洞写入任务工作目录 `报告/`(文件名=漏洞标题),由 `src-report-sync` 统一对账归档。",
+		goal:        "输出小程序的可验证安全问题与攻击面清单(高分三类优先:AppSecret 泄露、IDOR/越权、支付逻辑篡改):\n1) 已证实漏洞(位置/最小请求/回显证据,按危害排序);\n2) API 攻击面清单(端点、鉴权方式、高危标注)+ 云函数清单;\n3) 静态密钥与 appid 扩面发现;\n4) 覆盖度自评(静态命中/抓包补充/盲区)。\n已证实问题全部写入 `报告/`(由 src-report-sync 统一归档)。",
+	},
+}
+
+// taskTemplateWxminiSeedFlag gates the one-shot insert of the wxmini preset.
+const taskTemplateWxminiSeedFlag = "task_templates_wxmini_v1"
+
 // taskTemplateAndroidSeedFlag gates the one-shot insert of the android presets.
 const taskTemplateAndroidSeedFlag = "task_templates_android_v1"
 
@@ -105,7 +118,22 @@ ON CONFLICT (nkey) DO NOTHING`,
 				return fmt.Errorf("android template %q: %w", t.name, err)
 			}
 		}
-		return d.SetSetting(taskTemplateAndroidSeedFlag, "done")
+		if err := d.SetSetting(taskTemplateAndroidSeedFlag, "done"); err != nil {
+			return err
+		}
+	}
+	// 小程序渗透模板:独立门控,同 insert-if-absent 语义。
+	if v, _, _ := d.GetSetting(taskTemplateWxminiSeedFlag); v != "done" {
+		for _, t := range wxminiTaskTemplates {
+			if _, err := d.Exec(`
+INSERT INTO task_templates(name, nkey, description, goal)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (nkey) DO NOTHING`,
+				t.name, taskTemplateNKey(t.name), t.description, t.goal); err != nil {
+				return fmt.Errorf("wxmini template %q: %w", t.name, err)
+			}
+		}
+		return d.SetSetting(taskTemplateWxminiSeedFlag, "done")
 	}
 	return nil
 }
