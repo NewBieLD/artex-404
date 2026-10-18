@@ -325,13 +325,16 @@ func (s *Server) lookupDevice(idOrDeviceID string) (*db.DeviceRecord, error) {
 	return nil, fmt.Errorf("设备 %s 不存在(未登记或已删除)", v)
 }
 
-// seedDeviceTools 把设备工具 seed 进 tools 表、默认绑定 worker
-// (SeedTool 首插入语义:老库的用户编辑不被覆盖)。
+// seedDeviceTools 把设备工具 seed 进 tools 表。绑定面与既有安卓工具一致
+// (worker + mainagent/auto + pentest 族 + android.pentest/android.reverse/
+// reverse.frida 变体),保证安卓任务模板的 agent 能看到 droid_unpack 等新工具。
+// (SeedTool 首插入语义:老库的用户编辑不被覆盖。)
 func (s *Server) seedDeviceTools() {
-	workerAgents, _ := json.Marshal([]string{"worker"})
+	agents, _ := json.Marshal([]string{"worker", "mainagent", "auto", "pentest",
+		"android.pentest", "android.reverse", "reverse.frida"})
 	for _, t := range s.deviceTools() {
 		schema, _ := json.Marshal(t.InputSchema())
-		if err := s.m.PG().SeedTool(t.Name(), t.Description(), schema, workerAgents); err != nil {
+		if err := s.m.PG().SeedTool(t.Name(), t.Description(), schema, agents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", t.Name(), err)
 		}
 	}

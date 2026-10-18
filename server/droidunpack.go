@@ -126,10 +126,12 @@ func (s *Server) ensureDeviceFridaServer(rec *db.DeviceRecord, wd string) error 
 			return fmt.Errorf("推送 frida-server 失败: %v %s", perr, push.Error)
 		}
 	}
-	// 拉起(哨兵实战验证过的命令形态:su 内 nohup 后台 + 落位确认)。
+	// 拉起。注意 DroidBridge exec 以 app 身份(untrusted_app)跑:SELinux 拒绝
+	// app 对 /data/local/tmp 的 chmod,root 进程也不在 app 可见的 /proc 里——
+	// chmod/启动/查 pid 必须整段走 su(真机踩坑:非 su 的 chmod 直接 EACCES)。
 	start, serr := s.devGW.Request(rec.DeviceID, map[string]any{
 		"t": "exec", "asRoot": false, "timeoutMs": 20000,
-		"cmd": fmt.Sprintf(`chmod 755 %s; su -c "nohup %s > /dev/null 2>&1 &"; sleep 1; pidof frida-server`,
+		"cmd": fmt.Sprintf(`su -c "chmod 755 %s; nohup %s > /dev/null 2>&1 &"; sleep 1; su -c "pidof frida-server"`,
 			deviceFridaServer, deviceFridaServer),
 	}, 25*time.Second)
 	if serr != nil || !start.OK {
@@ -137,6 +139,19 @@ func (s *Server) ensureDeviceFridaServer(rec *db.DeviceRecord, wd string) error 
 	}
 	if strings.TrimSpace(start.Stdout) == "" {
 		return fmt.Errorf("frida-server 启动后 pidof 为空(设备可能无 root 或 su 拒绝)")
+	}
+	return nil
+}
+
+// ensureDeviceDumpDir root 预建脱壳产物目录并放开权限(dex_dump 以 app 进程
+// 身份落盘,untrusted_app 写不了未放开的 /data/local/tmp 子目录)。
+func (s *Server) ensureDeviceDumpDir(deviceID string) error {
+	res, err := s.devGW.Request(deviceID, map[string]any{
+		"t": "exec", "asRoot": true, "timeoutMs": 8000,
+		"cmd": "mkdir -p " + deviceDumpDir + " && chmod 0777 " + deviceDumpDir + " && echo OK",
+	}, 12*time.Second)
+	if err != nil || !res.OK {
+		return fmt.Errorf("脱壳目录准备失败: %v %s", err, res.Error)
 	}
 	return nil
 }
@@ -191,6 +206,11 @@ func (s *Server) droidUnpackTool() actool.CoreTool {
 			}
 			if err := s.ensureDeviceFridaServer(rec, wd); err != nil {
 				return actool.Errorf(err.Error()), nil
+			}
+			// dex_dump 以 app 进程身份写 /data/local/tmp/sentinel-unpack,
+			// untrusted_app 对 /data/local/tmp 无写权限——root 预建并放开目录。
+			if mkErr := s.ensureDeviceDumpDir(rec.DeviceID); mkErr != nil {
+				return actool.Errorf(mkErr.Error()), nil
 			}
 			port, terr := s.devGW.OpenTunnel(rec.DeviceID, "127.0.0.1", deviceFridaPort)
 			if terr != nil {
