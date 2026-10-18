@@ -1,9 +1,9 @@
-// droidgateway.go 是 DroidBridge 反连 WS 网关(判活期 1),协议与哨兵
+// droidgateway.go 是 DroidBridge 反连 WS 网关,协议与哨兵
 // DroidGateway(packages/web/src/droid-gateway.ts)逐帧对齐:设备拨
 // ws(s)://host:port/ws/droid?token=…,hello 优先(hb 抢跑 4001 关闭),
 // 心跳 15s,45s 无帧判「无响应」(看门狗 5s sweep),同 deviceId 新连接
-// 替换旧连接(4003)。期 1 只做判活闭环:hello/welcome + hb + result
-// (probe_device 的 exec 往返);data/tcp 帧容忍但忽略,留给后续期。
+// 替换旧连接(4003)。判活闭环(hello/welcome + hb + result)在期 1 落地;
+// 期 2 传输层(data 帧流式 pull/push 分片/TCP 隧道)见 droidstream.go。
 //
 // 一个要害照搬哨兵的教训:静默 ≠ 断开。Android(尤其模拟器)能把整个 app
 // SIGSTOP——socket 还是 ESTABLISHED,但任何代码都不再执行,心跳停、请求
@@ -41,13 +41,15 @@ const (
 	deviceCloseBound     = 4005
 )
 
-// deviceResult 是一次请求(exec 等)的聚合应答。
+// deviceResult 是一次请求(exec 等)的聚合应答。Bytes 仅内部使用(无 onData
+// 的流式 pull 在 result 帧时拼装),不进任何 JSON 序列化路径。
 type deviceResult struct {
 	OK     bool   `json:"ok"`
 	Code   int    `json:"code,omitempty"`
 	Stdout string `json:"stdout,omitempty"`
 	Stderr string `json:"stderr,omitempty"`
 	Error  string `json:"error,omitempty"`
+	Bytes  []byte `json:"-"`
 }
 
 // deviceConn 是一台在线设备的活连接。
@@ -67,8 +69,11 @@ type DeviceGateway struct {
 	mu      sync.Mutex
 	conns   map[string]*deviceConn // deviceId → live conn
 	pendMu  sync.Mutex
-	pending map[string]chan deviceResult // reqId → 等待者
-	pendDev map[string]string            // reqId → deviceId(断连时精确 fail)
+	pending map[string]*gwPending     // reqId → 等待者
+	pendDev map[string]string         // reqId → deviceId(断连时精确 fail)
+	streams map[string]*gwStream      // reqId → 流式聚积(data 帧,见 droidstream.go)
+	tunMu   sync.Mutex                // 隧道注册表锁
+	tunnels map[string]*gwTunnel      // deviceID|host:port → 隧道(frida -H 用)
 
 	listener   *http.Server // 独立反连监听(不过门控/JWT;鉴权=token)
 	listenAddr string
@@ -82,7 +87,8 @@ type DeviceGateway struct {
 
 func newDeviceGateway(store *db.DeviceStore) *DeviceGateway {
 	return &DeviceGateway{store: store, conns: map[string]*deviceConn{},
-		pending: map[string]chan deviceResult{}, pendDev: map[string]string{}}
+		pending: map[string]*gwPending{}, pendDev: map[string]string{},
+		streams: map[string]*gwStream{}, tunnels: map[string]*gwTunnel{}}
 }
 
 // --- 监听生命周期 ---
@@ -222,6 +228,11 @@ func (g *DeviceGateway) onConnection(ws *websocket.Conn, rec *db.DeviceRecord) {
 			Stdout     string `json:"stdout"`
 			Stderr     string `json:"stderr"`
 			Err        string `json:"error"`
+			Seq        int    `json:"seq"`
+			B64        string `json:"b64"`
+			Done       bool   `json:"done"`
+			TunnelID   string `json:"tunnelId"`
+			ConnID     string `json:"connId"`
 		}
 		if json.Unmarshal(raw, &frame) != nil {
 			continue // 非 JSON 帧丢弃(哨兵同款:不杀连接)
@@ -274,10 +285,16 @@ func (g *DeviceGateway) onConnection(ws *websocket.Conn, rec *db.DeviceRecord) {
 		case "hb":
 			go g.touchSeen(conn)
 		case "result":
-			g.resolveResult(frame.ReqID, deviceResult{OK: frame.OK, Code: frame.Code,
-				Stdout: frame.Stdout, Stderr: frame.Stderr, Error: frame.Err})
+			res := deviceResult{OK: frame.OK, Code: frame.Code,
+				Stdout: frame.Stdout, Stderr: frame.Stderr, Error: frame.Err}
+			g.assembleStream(frame.ReqID, &res)
+			g.resolveResult(frame.ReqID, res)
+		case "data":
+			g.handleDataFrame(frame.ReqID, frame.Seq, frame.B64)
+		case "tcp_opened", "tcp_data", "tcp_closed":
+			g.handleTcpDeviceFrame(frame.T, frame.TunnelID, frame.ConnID, frame.ReqID, frame.B64, frame.OK, frame.Err)
 		default:
-			// data/tcp_* 等帧:期 1 只需判活,markAlive 已计;忽略载荷。
+			// 未知帧:markAlive 已计,忽略载荷。
 		}
 	}
 }
@@ -319,6 +336,7 @@ func (g *DeviceGateway) onClose(c *deviceConn) {
 		log.Printf("[devices] 离线落库失败(#%d): %v", c.dbID, err)
 	}
 	g.failPendingOf(c.deviceID, "设备连接已断开")
+	g.closeTunnelsOf(c.deviceID)
 	log.Printf("[devices] 设备离线:#%d %s", c.dbID, c.deviceID)
 }
 
@@ -451,47 +469,12 @@ func (g *DeviceGateway) closeConnRaw(ws *websocket.Conn, code int, reason string
 	_ = ws.Close()
 }
 
-// --- 请求往返(期 1:probe_device 的 exec)---
+// --- 请求往返(期 1:probe_device 的 exec;期 2:pull/push/隧道见 droidstream.go)---
 
 // Request 给设备发一帧请求并等它的 result;deviceID 离线/无响应立即失败,
 // 不等自己的超时。frame 需带 t 字段,reqId 由这里注入。
 func (g *DeviceGateway) Request(deviceID string, frame map[string]any, timeout time.Duration) (deviceResult, error) {
-	g.mu.Lock()
-	c := g.conns[deviceID]
-	if c == nil {
-		g.mu.Unlock()
-		return deviceResult{}, fmt.Errorf("设备不在线(deviceId=%s)", deviceID)
-	}
-	idle := time.Since(c.lastFrame)
-	stale := c.stale || idle > deviceStaleAfter
-	g.mu.Unlock()
-	if stale {
-		return deviceResult{}, fmt.Errorf("设备无响应:已 %s 未收到心跳,请先在设备上唤醒 DroidBridge",
-			idle.Round(time.Second))
-	}
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	reqID := fmt.Sprintf("d%d%d", time.Now().UnixNano(), g.counter.Add(1))
-	ch := make(chan deviceResult, 1)
-	g.pendMu.Lock()
-	g.pending[reqID] = ch
-	g.pendDev[reqID] = deviceID
-	g.pendMu.Unlock()
-	frame["reqId"] = reqID
-	if err := g.sendJSON(c, frame); err != nil {
-		g.dropPending(reqID)
-		return deviceResult{}, fmt.Errorf("发送失败: %v", err)
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case res := <-ch:
-		return res, nil
-	case <-timer.C:
-		g.dropPending(reqID)
-		return deviceResult{}, fmt.Errorf("设备响应超时(%s)", timeout)
-	}
+	return g.requestInternal(deviceID, frame, timeout, nil)
 }
 
 func (g *DeviceGateway) sendJSON(c *deviceConn, v any) error {
@@ -507,14 +490,14 @@ func (g *DeviceGateway) sendJSON(c *deviceConn, v any) error {
 
 func (g *DeviceGateway) resolveResult(reqID string, res deviceResult) {
 	g.pendMu.Lock()
-	ch := g.pending[reqID]
-	if ch != nil {
+	p := g.pending[reqID]
+	if p != nil {
 		delete(g.pending, reqID)
 		delete(g.pendDev, reqID)
 	}
 	g.pendMu.Unlock()
-	if ch != nil {
-		ch <- res
+	if p != nil {
+		p.ch <- res
 	}
 }
 
@@ -522,24 +505,26 @@ func (g *DeviceGateway) dropPending(reqID string) {
 	g.pendMu.Lock()
 	delete(g.pending, reqID)
 	delete(g.pendDev, reqID)
+	delete(g.streams, reqID)
 	g.pendMu.Unlock()
 }
 
 func (g *DeviceGateway) failPendingOf(deviceID, reason string) {
 	g.pendMu.Lock()
-	var chans []chan deviceResult
+	var pending []*gwPending
 	for id, dev := range g.pendDev {
 		if dev != deviceID {
 			continue
 		}
-		if ch := g.pending[id]; ch != nil {
-			chans = append(chans, ch)
+		if p := g.pending[id]; p != nil {
+			pending = append(pending, p)
 		}
 		delete(g.pending, id)
 		delete(g.pendDev, id)
+		delete(g.streams, id)
 	}
 	g.pendMu.Unlock()
-	for _, ch := range chans {
-		ch <- deviceResult{OK: false, Error: reason}
+	for _, p := range pending {
+		p.ch <- deviceResult{OK: false, Error: reason}
 	}
 }

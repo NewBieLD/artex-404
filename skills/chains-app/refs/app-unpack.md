@@ -195,3 +195,17 @@
 **A1**: 回到元问题:我到底要什么?把"脱壳"这个手段放下,重列达成目标的所有路径。判据:目标是数据→找数据落地点(存储/日志/内存);目标是接口→抓包 + 服务端;目标是算法→hook 黑盒 oracle 远程调用。
 **Q2**: 重新审题后发现确实非脱壳不可?
 **A2**: 那就把范围缩到极致:只脱包含目标的那一个类/一个方法,用最激进的运行时 dump(命中即抓),接受脏数据人工修。红队最忌钻牛角尖——手段服务目标,目标不变则换尽一切手段。
+
+### 平台工具化:apk_packer_check 与 droid_unpack(2026-10 增补,同步哨兵 11ee8e99)
+
+**Q1**: 判壳不想靠肉眼翻 so 名单,平台有工具吗?
+**A1**: `apk_packer_check` host 工具:输入 apktool/jadx 反编译目录(最准,so 清单 + smali 扫描)、或 .apk/.zip(zip 条目 + dex 字符串池)、或单个 .dex。特征表 10 家:梆梆/SecNeo、360 加固保、腾讯乐固、爱加密、娜迦、百度、腾讯 TP/ACE、网易易盾、DexProtector、几维。返回结构化 JSON(命中厂商、证据、so 清单);命中时硬指令:直接反编译 base.apk 只能得到壳代码,先 droid_unpack 再反编译。建议把加固厂商写成任务事实(后续 hook 层级选择、脱壳打法都依赖它)。
+
+**Q2**: 判定加固后,内存脱壳怎么跑?
+**A2**: `droid_unpack` host 工具一键管道:spawn 目标 app → 注入 dex_dump(FRIDA-DEXDump 风格,0.5s/8s 两轮扫内存 dex magic,覆盖迟加载 multidex)→ 设备侧打包 → 网关流式拉回 → 解到工作目录 `evidence/unpack/<包名>/`,返回 dex 清单(按大小降序)。前置自动处理:设备缺 frida-server 时用工作目录 `frida-server` 二进制推送拉起。seconds 参数默认 30(范围 10-120),app 走得越深 dump 出的越多。
+
+**Q3**: 工具跑不了/结果不对时的兜底?
+**A3**: 按失败原因分流:app 被杀(壳检测 frida)→ 先注入资产库 `anti_frida_bypass.js` 再跑;宿主机没有 frida CLI → `pip install frida-tools`;设备未 root → 转应用层方案(frida-gadget 重打包、BlackDex),见上文对应场景。判"壳只执行内存不落 dex"的局限:dex_dump 覆盖不了,转 FART 级主动调用或行为指纹路线。
+
+**Q4**: dump 出的 dex 怎么续流程?
+**A4**: 逐个反编译最大的几个 dex(jadx/apk_decompile 都吃 dex 路径),先看 Manifest 入口对应的 Application 类定位真实业务 dex;抽取壳(函数体 nop)dump 出的方法体仍是空的——判据:jadx 打开方法体全空 → 抽取壳,换路线。同步口径:工具与 dex_dump 脚本移植自全链哨兵 11ee8e99,产物目录布局与其一致(evidence/unpack/<包名>/)。

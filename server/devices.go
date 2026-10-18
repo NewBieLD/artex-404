@@ -1,7 +1,7 @@
-// devices.go 装配 Android 反连设备子系统(判活期 1):init(devStore + 网关 +
-// 独立监听)、两个 host 工具(list_devices/probe_device,默认绑 worker)、
-// REST(/api/devices,JWT 后的人工通道)。协议见 droidgateway.go;表见
-// db/devices.go。期 2(exec/文件/隧道)在此之上加帧即可。
+// devices.go 装配 Android 反连设备子系统:init(devStore + 网关 + 独立监听)、
+// host 工具(list_devices/probe_device/device_exec/droid_unpack/apk_packer_check,
+// 默认绑 worker)、REST(/api/devices,JWT 后的人工通道)。协议见
+// droidgateway.go 与 droidstream.go(期 2 传输层);表见 db/devices.go。
 package server
 
 import (
@@ -118,7 +118,8 @@ func (s *Server) deviceTools() []actool.CoreTool {
 	if s.devStore == nil || s.devGW == nil {
 		return nil
 	}
-	return []actool.CoreTool{s.listDevicesTool(), s.probeDeviceTool(), s.deviceExecTool()}
+	return []actool.CoreTool{s.listDevicesTool(), s.probeDeviceTool(), s.deviceExecTool(),
+		s.droidUnpackTool(), s.apkPackerCheckTool()}
 }
 
 // deviceExecTool 经反连通道在设备上执行 shell 命令(设备侧能力解锁:DroidBridge

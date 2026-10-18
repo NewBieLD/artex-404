@@ -339,3 +339,20 @@
 **A4**: 评估这条路的边际收益。若目标能从其他攻击面(Web端、小程序、开放 API、旧版本 App)更省力达到,就转攻击面。客户端逆向是手段不是目的,哪条路到目标最短走哪条。
 **Q5**: 彻底没思路了?
 **A5**: 回到侦察——重新做一遍信息收集,常有第一遍遗漏的线索(未分析的 so、隐藏 Activity、调试接口、注释里的测试地址、其他端点)。卡死时,补侦察往往比在原地加 hook 更有效。
+
+### 平台脚本资产库与参数化(2026-10 增补,同步哨兵 11ee8e99)
+
+**Q1**: 常规 hook(抓明文/绕证书/绕 root 检测/打印加解密)不想每次手写脚本,平台有没有现成的?
+**A1**: 用技能资产库 `skills/chains-app/assets/frida/`(安装目录下,共 8 个实战脚本):`okhttp_log`(OkHttp 明文,参数 url=子串过滤)、`ssl_pinning_bypass`(Java 层全量证书校验绕过,含 OkHttp 4.x check$okhttp)、`root_detection_bypass`(su/magisk/KernelSU 检测绕过)、`crypto_log`(Cipher/Mac 的算法+密钥+明文,参数 alg=算法子串)、`native_ssl_bypass`(libssl/boringssl 层)、`flutter_bypass`(libflutter arm64 pattern 扫 ssl_verify)、`anti_frida_bypass`(ptrace/strstr/27042 端口探测反制)、`dex_dump`(内存脱壳,配套 droid_unpack 工具)。判据:命中这些场景先取资产,改参数再跑,别从零手写。
+
+**Q2**: 参数怎么传?
+**A2**: 每个脚本头部有 `SENTINEL_PARAMS = {}` 对象,直接改键值(如 `{"url":"/api"}` 或 `{"alg":"AES"}`),脚本内经 `sp(key, 默认值)` 读取。这是哨兵 `name?key=value` 参数化语法的文件化形态;所有参数可选,空对象即默认行为。
+
+**Q3**: 多个脚本怎么组合?
+**A3**: 单次注入按序传多个 `-l`(frida CLI 原生支持,≤4 个为宜);app 有 frida 检测时 `anti_frida_bypass` 永远放第一个。每个脚本输出前有 `[*]` 安装确认行,混合输出按脚本分段阅读;跑完的输出自觉截断(哨兵工具化形态每脚本 6000 字符配额,手动跑时用 head/tail 自律,防刷爆会话上下文)。
+
+**Q4**: 这些脚本与设备链路怎么接?
+**A4**: 前置:root 测试机在线(DroidBridge 反连)+ 设备侧 frida-server + 宿主机 frida CLI(pip install frida-tools)。平台 `droid_unpack` 工具会自动开网关 TCP 隧道(设备 127.0.0.1:27042 ↔ 本机随机端口)并按需拉起 frida-server;手动跑其它脚本时把 app 推到前台后经同一条隧道 `frida -H 127.0.0.1:<port>` 注入,或退回 adb forward + `frida -U`。版本纪律:frida CLI 与 frida-server 大版本必须匹配。
+
+**Q5**: 脚本不命中(hook 的类不存在)怎么办?
+**A5**: 脚本是起点不是魔法:混淆/自研协议/换引擎(flutter_bypass 换过引擎就扫不到)需要按目标改脚本;先读反编译代码确认类名再 hook 的铁律不变。同步口径:8 个脚本同步自全链哨兵 11ee8e99 实战修复版;`ssl_pinning_bypass` 修正了上游 SSLContext.init 的数组类型描述符写法(上游原文 `[javax.net.ssl.KeyManager[]` 在部分 frida 版本会解析失败)。
