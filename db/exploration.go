@@ -1199,7 +1199,6 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 		       COALESCE(latest_activity.created_at,0),
 		       COALESCE(goal_metrics.total,0),
 		       COALESCE(goal_metrics.met,0),
-		       COALESCE(intent_metrics.running,0)
 		       COALESCE(intent_metrics.running,0),
 		       COALESCE(finding_metrics.critical,0),
 		       COALESCE(finding_metrics.high,0),
