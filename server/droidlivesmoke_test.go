@@ -286,10 +286,10 @@ func TestLiveDeviceDynamicSmoke(t *testing.T) {
 	if len(candidates) == 0 {
 		t.Fatalf("设备上没有第三方包可作 spawn 目标")
 	}
-	t.Logf("spawn 候选: %v", candidates)
+	t.Logf("attach 候选: %v", candidates)
 
-	// 6) dex_dump.js 落盘并 spawn 注入(工具内嵌脚本)。个别系统/加固 app 对
-	//    注入不耐受(加载脚本即死),按候选轮试,任一成功即继续。
+	// 6) dex_dump.js 落盘,按候选走 attach 流(与工具一致):monkey 拉起 → su pidof
+	//    → attach + stdin 保活(新版 CLI 在 stdin EOF 即退,-q 不例外)。
 	work := t.TempDir()
 	script := filepath.Join(work, "dex_dump.js")
 	if werr := os.WriteFile(script, []byte(dexDumpScript), 0o644); werr != nil {
@@ -298,13 +298,45 @@ func TestLiveDeviceDynamicSmoke(t *testing.T) {
 	var listed string
 	var dumpOK bool
 	for _, pkg := range candidates {
-		// --eternalize:新版 frida CLI -q 加载完即退,脚本驻留目标进程里继续跑。
-		runCtx, runCancel := context.WithTimeout(ctx, 30*time.Second)
-		out, _ := exec.CommandContext(runCtx, fridaBin,
+		g.Request(rec.DeviceID, map[string]any{
+			"t": "exec", "asRoot": false, "timeoutMs": 20000,
+			"cmd": `su -c "monkey -p ` + pkg + ` -c android.intent.category.LAUNCHER 1"`,
+		}, 25*time.Second)
+		time.Sleep(5 * time.Second)
+		pidRes, perr := g.Request(rec.DeviceID, map[string]any{
+			"t": "exec", "asRoot": false, "timeoutMs": 8000,
+			"cmd": `su -c "pidof ` + pkg + `"`,
+		}, 12*time.Second)
+		pid := ""
+		if perr == nil && pidRes.OK {
+			if f := strings.Fields(strings.TrimSpace(pidRes.Stdout)); len(f) > 0 {
+				pid = f[0]
+			}
+		}
+		if pid == "" {
+			t.Logf("候选 %s 拉起失败(无 pid)", pkg)
+			continue
+		}
+		runCtx, runCancel := context.WithTimeout(ctx, 60*time.Second)
+		cmd := exec.CommandContext(runCtx, fridaBin,
 			"-H", fmt.Sprintf("127.0.0.1:%d", port),
-			"-f", pkg, "-l", script, "-q", "--eternalize").CombinedOutput()
+			"--pid", pid, "-l", script, "-q")
+		stdinPipe, spErr := cmd.StdinPipe()
+		if spErr != nil {
+			t.Fatalf("stdin: %v", spErr)
+		}
+		if stErr := cmd.Start(); stErr != nil {
+			t.Logf("候选 %s attach 启动失败: %v", pkg, stErr)
+			runCancel()
+			continue
+		}
+		select {
+		case <-runCtx.Done():
+		case <-time.After(12 * time.Second): // 睡过 8s 第二轮扫描 + 余量
+		}
+		_ = stdinPipe.Close()
+		out, _ := cmd.CombinedOutput() // 内含 Wait
 		runCancel()
-		time.Sleep(12 * time.Second) // 睡过 8s 第二轮扫描 + 余量
 		listing, lerr := g.Request(rec.DeviceID, map[string]any{
 			"t": "exec", "cmd": "ls -la " + deviceDumpDir + "/ 2>/dev/null | head -30", "asRoot": true, "timeoutMs": 15000,
 		}, 25*time.Second)
@@ -314,7 +346,7 @@ func TestLiveDeviceDynamicSmoke(t *testing.T) {
 		}
 		if strings.Contains(listed, ".dex") {
 			dumpOK = true
-			t.Logf("候选 %s dump 成功", pkg)
+			t.Logf("候选 %s attach(pid=%s) dump 成功", pkg, pid)
 			break
 		}
 		t.Logf("候选 %s 未产出 dex(frida 输出: %s)", pkg, clampString(string(out), 300))

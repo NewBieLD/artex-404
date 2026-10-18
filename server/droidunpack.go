@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -159,7 +160,7 @@ func (s *Server) ensureDeviceDumpDir(deviceID string) error {
 func (s *Server) droidUnpackTool() actool.CoreTool {
 	return actool.Build(actool.Spec{
 		Name: "droid_unpack",
-		Description: "内存脱壳加固 APK:spawn 目标 app 注入 dex_dump(FRIDA-DEXDump 风格),等壳解密后扫进程内存里的 dex magic," +
+		Description: "内存脱壳加固 APK:拉起目标 app 后 attach 注入 dex_dump(FRIDA-DEXDump 风格,只扫内存不 hook),扫进程内存里的 dex magic," +
 			"dump 出的 dex 打包拉回并解到工作目录 evidence/unpack/<包名>/。前置:root 设备在线、设备侧 frida-server" +
 			"(没有会尝试用工作目录 frida-server 推送拉起)、宿主机 frida CLI(pip install frida-tools)。返回 dex 清单与路径," +
 			"后续用反编译工具逐个看最大的几个 dex。局限:抽取壳(函数体 nop)dump 出的方法体仍是空的。",
@@ -167,7 +168,7 @@ func (s *Server) droidUnpackTool() actool.CoreTool {
 			"type": "object",
 			"properties": map[string]any{
 				"device_id": strParam("list_devices 返回的 device_id(或行 id)"),
-				"app":       strParam("目标应用包名(spawn 模式启动,如 com.target.app)"),
+				"app":       strParam("目标应用包名(未运行会经 root 自动拉起,如 com.target.app)"),
 				"seconds":   map[string]any{"type": "integer", "description": "等待收集秒数(默认 30,范围 10-120;越晚加载的 dex 越多)"},
 			},
 			"required": []any{"device_id", "app"},
@@ -184,6 +185,10 @@ func (s *Server) droidUnpackTool() actool.CoreTool {
 			a.App = strings.TrimSpace(a.App)
 			if a.App == "" {
 				return actool.Errorf("app 必填(目标应用包名)"), nil
+			}
+			// 包名白名单:app 会拼进设备侧 su 命令,杜绝注入面。
+			if !packageNameRe.MatchString(a.App) {
+				return actool.Errorf("app 需为合法包名(字母开头的点分段,如 com.target.app)"), nil
 			}
 			rec, err := s.lookupDevice(a.DeviceID)
 			if err != nil {
@@ -225,21 +230,61 @@ func (s *Server) droidUnpackTool() actool.CoreTool {
 				return actool.Errorf("写入 dex_dump.js 失败: " + wErr.Error()), nil
 			}
 
-			// frida CLI -q 在加载完脚本后即退出(新版行为,与哨兵容器内老版不同):
-			// --eternalize 让脚本驻留目标进程,CLI 退出后 0.5s/8s 两轮扫描继续跑,
-			// 这里睡满采集窗口再收割。
-			runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			// attach + stdin 保活(替代哨兵的 spawn):真机二分定位表明本机 frida
+			// 17.24.1 CLI 在 stdin EOF(含 -q)时立即退出,setTimeout 扫描没有执行
+			// 窗口;保持 stdin 打开则 0.5s/8s 两轮扫描正常跑,关 stdin 才退。app 未
+			// 运行先经 root 拉起——dex_dump 只扫内存不 hook,晚注入反而收获更多已
+			// 加载的 dex。app 参数已过包名白名单,拼进 su 命令无注入面。
+			pid := ""
+			for attempt := 0; attempt < 2; attempt++ {
+				if attempt == 1 {
+					mon, merr := s.devGW.Request(rec.DeviceID, map[string]any{
+						"t": "exec", "asRoot": false, "timeoutMs": 20000,
+						"cmd": fmt.Sprintf(`su -c "monkey -p %s -c android.intent.category.LAUNCHER 1"`, a.App),
+					}, 25*time.Second)
+					if merr != nil || !mon.OK {
+						return actool.Errorf(fmt.Sprintf("拉起应用失败: %v %s(可手工打开一次后重试)", merr, mon.Stderr)), nil
+					}
+					time.Sleep(3 * time.Second)
+				}
+				pidRes, prErr := s.devGW.Request(rec.DeviceID, map[string]any{
+					"t": "exec", "asRoot": false, "timeoutMs": 8000,
+					"cmd": `su -c "pidof ` + a.App + `"`,
+				}, 12*time.Second)
+				if prErr == nil && pidRes.OK {
+					if f := strings.Fields(strings.TrimSpace(pidRes.Stdout)); len(f) > 0 {
+						pid = f[0]
+					}
+				}
+				if pid != "" {
+					break
+				}
+			}
+			if pid == "" {
+				return actool.Errorf("应用进程不存在(pidof 为空),无法 attach"), nil
+			}
+			runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Seconds+25)*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(runCtx, fridaBin,
 				"-H", fmt.Sprintf("127.0.0.1:%d", port),
-				"-f", a.App, "-l", scriptPath, "-q", "--eternalize")
-			out, _ := cmd.CombinedOutput()
-			fridaOut := clampString(string(out), 4000)
+				"--pid", pid, "-l", scriptPath, "-q")
+			stdinPipe, spErr := cmd.StdinPipe()
+			if spErr != nil {
+				return actool.Errorf("stdin 管道创建失败: " + spErr.Error()), nil
+			}
+			if stErr := cmd.Start(); stErr != nil {
+				return actool.Errorf("frida 启动失败: " + stErr.Error()), nil
+			}
 			select {
 			case <-ctx.Done():
+				_ = cmd.Process.Kill()
 				return actool.Errorf("上下文取消"), nil
+			case <-runCtx.Done():
 			case <-time.After(time.Duration(a.Seconds) * time.Second):
 			}
+			_ = stdinPipe.Close() // stdin EOF → frida 退出,会话内两轮扫描已跑完
+			out, _ := cmd.CombinedOutput() // 内含 Wait
+			fridaOut := clampString(string(out), 4000)
 
 			listing, lerr := s.devGW.Request(rec.DeviceID, map[string]any{
 				"t": "exec", "cmd": "ls -la " + deviceDumpDir + "/ 2>/dev/null | head -50", "asRoot": true, "timeoutMs": 15000,
@@ -377,6 +422,10 @@ func listDexFiles(dir string) []map[string]any {
 	}
 	return files
 }
+
+// packageNameRe 合法 Android 包名(字母开头的点分段);app 参数拼进 su 命令前
+// 的注入防线。
+var packageNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$`)
 
 // sanitizeFileName 把包名变成安全的文件名段。
 func sanitizeFileName(s string) string {
