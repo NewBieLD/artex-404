@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 认证
+
+#### 修复的问题
+
+- **移植上游 v0.3.15 管理员密码覆盖漏洞修复（RuoJi6/ARTEX `a951e4a`）**：`authStatus` / `authInit` / `authChangePassword` / `authLogin` 此前把 `GetSetting` 的读错误与「键不存在」同等对待（`hash, _, _ :=`），数据库抖动或连接被顶爆期间，无需登录的 `POST /api/auth/init` 会把实例当成「未初始化」直接覆盖 `auth.password_hash` 并签发会话——对可执行命令的渗透平台即管理员接管。现读失败一律 503 fail-closed；「仅首次可设」下沉到数据库层 `InsertSettingIfAbsent`（`ON CONFLICT DO NOTHING`，主键约束兜住 bcrypt 期间的并发窗口）；密码长度改为服务端校验（≥8 字符、≤72 字节，后者同时避开 bcrypt 硬上限）；`db.Open` 封顶连接池（32 条，配 30 分钟寿命与 5 分钟空闲淘汰）——高并发变成变慢而不是把 auth 路径推进 fail-open。前端 `/setup` 在查不到初始化状态时关闭表单入口（读失败不再渲染「未初始化」假象）。附 fail-closed 回归测试（关池断言 503）与 `InsertSettingIfAbsent` 不覆盖测试。
+
 ### 报告
 
 #### 修改的功能
@@ -31,6 +37,12 @@
 #### 修复的问题
 
 - **修复 demo 任务详情页整页崩溃**：mock 模式下任务详情「会话」标签会去拉 `GET /api/tasks/<id>/side-questions`（旁路提问历史），但 mock handler 没有这条路由，被读兜底按“路径以 s 结尾即集合”返回了 `[]`，导致 `data.items` 为 `undefined`，旁路 hook 的 `merge()` 对其迭代抛 `TypeError: t is not iterable`；该异常发生在 `setItems` 的 updater 里、被 React 推迟到 render 阶段重抛，调用方 `catch` 接不住，整页被错误边界接管显示 “This page couldn't load”。现在 mock handler 显式返回空的旁路历史，`sideAPI.history` 也对返回值做归一化（`items` 非数组一律兜成 `[]`）作为防御纵深。
+
+### 设备与安卓链路
+
+#### 新增的功能
+
+- **安卓链路期 2 传输层 + 哨兵 11ee8e99 三项能力移植**：网关补齐与 DroidBridge APK 逐帧兼容的 `pull`（data 帧流式分片、严格 seq 排序、256MB 上限、边收边写不占内存）、`push`（1MB 分片、仅 done 片应答、慢链路超时地板）与 TCP 隧道（本机随机端口 ↔ 设备任意端口，同目标复用、设备断开整体销毁）——`server/droidstream.go`。在此之上新增两个 host 工具（默认绑 worker，沿 deviceTools 家族形态）：`droid_unpack` 内存脱壳管道（确保设备侧 frida-server 存活→隧道 spawn 注入内嵌 dex_dump（FRIDA-DEXDump 风格两轮扫描）→设备侧 tar→流式拉回→解到工作目录 `evidence/unpack/<包名>/`，返回按大小降序的 dex 清单）；`apk_packer_check` 加固识别（10 家厂商特征表逐条对齐哨兵 PACKER_SIGNATURES，支持反编译目录/apk zip/单 dex 三种输入，类名痕迹做斜杠/点分双形态归一）。知识层同步：`skills/chains-app/assets/frida/` 落 8 个实战脚本（okhttp_log/ssl_pinning_bypass/root_detection_bypass/crypto_log/native_ssl_bypass/flutter_bypass/anti_frida_bypass/dex_dump，参数化走 SENTINEL_PARAMS 约定，ssl_pinning_bypass 修正上游 SSLContext.init 数组描述符写法），`refs/app-frida.md`、`refs/app-unpack.md` 补资产库与工具化决策链。附端到端测试（模拟 APK 帧行为的流式 pull/3.4MB 分片 push/隧道双向回显与复用，PG-gated）与特征匹配/解包防穿越单测。真机（OnePlus/Android 16/DroidBridge）帧级冒烟通过：exec/pull/push（84MB frida-server 分片推送）/隧道（承载真实 frida-ps 流量）全通；由此修两处真机坑——DroidBridge exec 以 untrusted_app 身份跑，frida-server 的 chmod/启动/查 pid 必须整段 `su -c`（裸 chmod 被 SELinux 拒），以及 dex_dump 落盘前 root 预建 `/data/local/tmp/sentinel-unpack` 并放开权限（app 进程对 /data/local/tmp 无写权限）；设备工具 seed 绑定面扩到与既有安卓工具一致（含 android.pentest/android.reverse/reverse.frida 变体）；新增真机帧级/动态两支手动门控冒烟测试（`server/droidlivesmoke_test.go`）。后续二轮真机定位:dex_dump 去 Java 化后 spawn 全通过,但 frida 17.24.1 CLI 的 `-q` 在加载完脚本后即退出,`--eternalize` 驻留也未让扫描落地(哨兵容器内老版 frida-tools 行为不同)——传输层六环(推送/拉起/隧道/frida-ps/spawn/目录)全部真机验证通过,dex 产出环节待 frida CLI 执行模型适配(候选:attach 模式+stdin 保持、或钉版与哨兵容器一致的 frida-tools)。来源：全链哨兵 Full-Chain-Sentinel-System `11ee8e99`，APK 与协议零改动即互通。
 
 ## [0.3.10] - 2026-09-13
 

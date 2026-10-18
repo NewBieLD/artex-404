@@ -59,3 +59,8 @@ Thumbs.db
 /Dockerfile.bench
 /Dockerfile.bench.v2
 /gate.key
+
+/artex.prev*
+/artex.log
+/artex.final*
+/artex.new2
