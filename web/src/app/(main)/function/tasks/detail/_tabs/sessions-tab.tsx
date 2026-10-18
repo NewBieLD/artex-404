@@ -940,127 +940,138 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     // 自动重连第二次握手必然 401——连接彻底关闭后重新换票重连;snapshot 游标
     // 回放 + mergeBySeq 按 seq 去重补偿空窗,等价于原来的 Last-Event-ID 续传。
     let sseRetry: ReturnType<typeof setTimeout> | undefined;
+    const rearmRetry = (fn: () => void, ms: number) => {
+      if (sseRetry) clearTimeout(sseRetry);
+      sseRetry = setTimeout(fn, ms);
+    };
     const openStreamRef = { current: null as null | (() => void) };
+    const bootRef = { current: null as null | (() => void) };
     // Resolve the main-agent segments first, then load the CURRENT segment's history and
     // open the SSE from its snapshot cursor. The SSE tails all segments and routes each
     // frame by session_key (main:<seg>), so switching segments needs no new stream.
-    api
-      .mainSessions(taskId)
-      .then((ms) => {
-        if (!alive || reqTokenRef.current.mainboot !== token) throw new Error("superseded");
-        const segs = ms.sessions.length ? ms.sessions : [{ seq: 0, created_at: "" }];
-        setMainSegs(segs);
-        setCurrentSeg(ms.current);
-        bootKey = mainSessionKey(ms.current);
-        if (bootKey !== mainSessionKey(0)) loadingKeysRef.current.delete(mainSessionKey(0));
-        loadingKeysRef.current.add(bootKey);
-        setActiveId(mainSessionId(ms.current));
-        patchStore(bootKey, (s) => ({ ...s, loading: true }));
-        return api.activityHistory(taskId, bootKey, 0, PAGE);
-      })
-      .then((r) => {
-        if (!alive || reqTokenRef.current.mainboot !== token) return;
-        snapshotRef.current = r.snapshotCursor;
-        patchStore(bootKey, (s) => {
-          const items = mergeBySeq(r.items, s.items);
-          return {
-            ...s,
-            items,
-            loaded: true,
-            loading: false,
-            hasMore: r.hasMore,
-            earliestSeq: items.length ? items[0].seq : 0,
-            unread: 0,
+    bootRef.current = () =>
+      api
+        .mainSessions(taskId)
+        .then((ms) => {
+          if (!alive || reqTokenRef.current.mainboot !== token) throw new Error("superseded");
+          const segs = ms.sessions.length ? ms.sessions : [{ seq: 0, created_at: "" }];
+          setMainSegs(segs);
+          setCurrentSeg(ms.current);
+          bootKey = mainSessionKey(ms.current);
+          if (bootKey !== mainSessionKey(0)) loadingKeysRef.current.delete(mainSessionKey(0));
+          loadingKeysRef.current.add(bootKey);
+          setActiveId(mainSessionId(ms.current));
+          patchStore(bootKey, (s) => ({ ...s, loading: true }));
+          return api.activityHistory(taskId, bootKey, 0, PAGE);
+        })
+        .then((r) => {
+          if (!alive || reqTokenRef.current.mainboot !== token) return;
+          snapshotRef.current = r.snapshotCursor;
+          patchStore(bootKey, (s) => {
+            const items = mergeBySeq(r.items, s.items);
+            return {
+              ...s,
+              items,
+              loaded: true,
+              loading: false,
+              hasMore: r.hasMore,
+              earliestSeq: items.length ? items[0].seq : 0,
+              unread: 0,
+            };
+          });
+          // Open the single task SSE from the snapshot cursor.
+          openStreamRef.current = () => {
+            void sseUrl(
+              `/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`,
+            )
+              .then((url) => {
+                if (!alive) return;
+                const es = new EventSource(url);
+                esRef.current = es;
+                es.onopen = () => setSseLive(true);
+                es.onerror = () => {
+                  setSseLive(false);
+                  // 一次性 ticket 不支持浏览器自动重连(重试即 401);彻底关闭后换票重连。
+                  if (es.readyState === EventSource.CLOSED && alive && esRef.current === es) {
+                    esRef.current = null;
+                    rearmRetry(() => openStreamRef.current?.(), 3000);
+                  }
+                };
+                es.onmessage = (e) => {
+                  let a: Activity;
+                  try {
+                    a = JSON.parse(e.data) as Activity;
+                  } catch {
+                    return; // ignore malformed frame
+                  }
+                  if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
+                    llmToastSeqRef.current.add(a.seq);
+                    const transition = a.metadata?.llm_transition;
+                    if (transition?.mode === "exhausted" || a.is_error) {
+                      toast.error(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                    } else if (transition?.mode === "automatic") {
+                      toast.success(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                    } else {
+                      toast.info(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
+                    }
+                    void api
+                      .taskLLMResolution(taskId)
+                      .then((value) => {
+                        if (alive) setLLMResolutions(value);
+                      })
+                      .catch(() => {
+                        // The periodic resolver poll will retry if this event-triggered refresh fails.
+                      });
+                  }
+                  const k = sessionKeyOf(a);
+                  setStore((prev) => {
+                    const cur = prev[k] ?? emptyState();
+                    const activeK = activeKeyRef.current;
+                    // Merge into sessions that are loaded, actively loading, or the current
+                    // view (so returning is instant + a frame that lands mid-load isn't lost).
+                    // A cold, inactive session also keeps a tiny accounting tail so the
+                    // sidebar can add the latest unfinished usage without loading history.
+                    if (!cur.loaded && !cur.loading && k !== activeK) {
+                      const accountingItems =
+                        a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
+                      return {
+                        ...prev,
+                        [k]: { ...cur, items: accountingItems, lastTs: a.ts, unread: cur.unread + 1 },
+                      };
+                    }
+                    let items = mergeBySeq(cur.items, [a]);
+                    // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
+                    // but never while the user is reading this session's history (scrolled up).
+                    let hasMore = cur.hasMore;
+                    let earliestSeq = cur.earliestSeq;
+                    const trimmable = k !== activeK || atBottomRef.current;
+                    if (trimmable && items.length > MAX_KEEP) {
+                      items = items.slice(items.length - MAX_KEEP);
+                      hasMore = true;
+                      earliestSeq = items[0].seq;
+                    }
+                    const unread = k === activeK ? 0 : cur.unread + 1;
+                    return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
+                  });
+                };
+              })
+              .catch(() => {
+                if (alive) rearmRetry(() => openStreamRef.current?.(), 3000);
+              });
           };
-        });
-        // Open the single task SSE from the snapshot cursor.
-        openStreamRef.current = () => {
-          void sseUrl(
-            `/api/exploration/activity/stream?task=${encodeURIComponent(taskId)}&since=${snapshotRef.current}`,
-          )
-            .then((url) => {
-              if (!alive) return;
-              const es = new EventSource(url);
-              esRef.current = es;
-              es.onopen = () => setSseLive(true);
-              es.onerror = () => {
-                setSseLive(false);
-                // 一次性 ticket 不支持浏览器自动重连(重试即 401);彻底关闭后换票重连。
-                if (es.readyState === EventSource.CLOSED && alive && esRef.current === es) {
-                  esRef.current = null;
-                  sseRetry = setTimeout(() => openStreamRef.current?.(), 3000);
-                }
-              };
-              es.onmessage = (e) => {
-                let a: Activity;
-                try {
-                  a = JSON.parse(e.data) as Activity;
-                } catch {
-                  return; // ignore malformed frame
-                }
-                if ((a.kind === "llm_switch" || a.kind === "llm_failover") && !llmToastSeqRef.current.has(a.seq)) {
-                  llmToastSeqRef.current.add(a.seq);
-                  const transition = a.metadata?.llm_transition;
-                  if (transition?.mode === "exhausted" || a.is_error) {
-                    toast.error(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-                  } else if (transition?.mode === "automatic") {
-                    toast.success(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-                  } else {
-                    toast.info(a.summary, { id: `task-${taskId}-llm-${a.seq}` });
-                  }
-                  void api
-                    .taskLLMResolution(taskId)
-                    .then((value) => {
-                      if (alive) setLLMResolutions(value);
-                    })
-                    .catch(() => {
-                      // The periodic resolver poll will retry if this event-triggered refresh fails.
-                    });
-                }
-                const k = sessionKeyOf(a);
-                setStore((prev) => {
-                  const cur = prev[k] ?? emptyState();
-                  const activeK = activeKeyRef.current;
-                  // Merge into sessions that are loaded, actively loading, or the current
-                  // view (so returning is instant + a frame that lands mid-load isn't lost).
-                  // A cold, inactive session also keeps a tiny accounting tail so the
-                  // sidebar can add the latest unfinished usage without loading history.
-                  if (!cur.loaded && !cur.loading && k !== activeK) {
-                    const accountingItems =
-                      a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
-                    return {
-                      ...prev,
-                      [k]: { ...cur, items: accountingItems, lastTs: a.ts, unread: cur.unread + 1 },
-                    };
-                  }
-                  let items = mergeBySeq(cur.items, [a]);
-                  // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
-                  // but never while the user is reading this session's history (scrolled up).
-                  let hasMore = cur.hasMore;
-                  let earliestSeq = cur.earliestSeq;
-                  const trimmable = k !== activeK || atBottomRef.current;
-                  if (trimmable && items.length > MAX_KEEP) {
-                    items = items.slice(items.length - MAX_KEEP);
-                    hasMore = true;
-                    earliestSeq = items[0].seq;
-                  }
-                  const unread = k === activeK ? 0 : cur.unread + 1;
-                  return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
-                });
-              };
-            })
-            .catch(() => {
-              if (alive) sseRetry = setTimeout(() => openStreamRef.current?.(), 3000);
-            });
-        };
-        openStreamRef.current();
-      })
-      .catch((err) => {
-        if (!alive || reqTokenRef.current.mainboot !== token) return;
-        if ((err as Error).message === "superseded") return;
-        patchStore(bootKey, (s) => ({ ...s, loading: false, error: (err as Error).message || "加载失败" }));
-      })
-      .finally(() => loadingKeysRef.current.delete(bootKey));
+          openStreamRef.current();
+        })
+        .catch((err) => {
+          if (!alive || reqTokenRef.current.mainboot !== token) return;
+          if ((err as Error).message === "superseded") return;
+          patchStore(bootKey, (s) => ({ ...s, loading: false, error: (err as Error).message || "加载失败" }));
+          // 启动链一次性失败(如恰逢服务重启窗口)此前不会自动恢复,徽标永远停在
+          // 「重连中」——这里退避重启整个启动链(superseded 守卫会否掉过期重试)。
+          rearmRetry(() => bootRef.current?.(), 5000);
+        })
+        .finally(() => loadingKeysRef.current.delete(bootKey));
+
+    bootRef.current();
 
     return () => {
       alive = false;

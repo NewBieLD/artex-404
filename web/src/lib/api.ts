@@ -195,9 +195,10 @@ function mockReport(_task?: string): string {
 }
 
 export async function sseUrl(path: string): Promise<string> {
-  const base =
-    process.env.NEXT_PUBLIC_SSE_BASE ??
-    (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8787` : "");
+  // SSE 与页面同源(前端与 API 同实例部署;历史硬编码 :8787 曾把 dev 页面的流
+  // 指向生产端口,生产停机即表现为永远「重连中」)。需要跨源时用
+  // NEXT_PUBLIC_SSE_BASE 显式覆盖。
+  const base = process.env.NEXT_PUBLIC_SSE_BASE ?? (typeof window !== "undefined" ? window.location.origin : "");
   const { ticket } = await post<{ ticket: string }>("/sse-ticket");
   const sep = path.includes("?") ? "&" : "?";
   return `${base}${path}${sep}ticket=${encodeURIComponent(ticket)}`;
