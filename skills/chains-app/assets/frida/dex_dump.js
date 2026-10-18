@@ -2,7 +2,10 @@
 // 落盘到 /data/local/tmp/sentinel-unpack/。配合 spawn 模式在壳解密完成后收集;
 // 抽取壳(函数体 nop)dump 出的方法体仍是空的。
 // 说明:平台 droid_unpack 工具内嵌的就是这份脚本;单独手动跑时经
-// device_exec + 隧道 frida 使用。与全链哨兵 11ee8e99 逐字节一致。
+// device_exec + 隧道 frida 使用。源自哨兵 11ee8e99,有一处刻意偏离:去掉了
+// Java.perform 包裹(其唯一职责是 mkdir,已由工具 root 预建目录承接)——
+// frida 17.24.1 + Android 16 组合下,加载期执行 Java.perform 会直接杀死
+// spawn 会话(真机 8/8 复现,纯 gum 操作不受影响)。
 var SENTINEL_PARAMS = {};
 function sp(k, d) { return SENTINEL_PARAMS[k] !== undefined ? SENTINEL_PARAMS[k] : d; }
 (function () {
@@ -38,14 +41,7 @@ function sp(k, d) { return SENTINEL_PARAMS[k] !== undefined ? SENTINEL_PARAMS[k]
       } catch (e) {}
     });
   }
-  Java.perform(function () {
-    try {
-      Java.use("java.lang.Runtime").getRuntime().exec(["mkdir", "-p", SAVE_DIR]);
-    } catch (e) {}
-    // One pass now (the class loader holds decrypted dex) and one later: late
-    // plugins and multidex land between the passes.
-    setTimeout(scan, 500);
-    setTimeout(scan, 8000);
-    setTimeout(function () { console.log("[dexdump] finished, " + count + " dex saved to " + SAVE_DIR); }, 9000);
-  });
+  setTimeout(scan, 500);
+  setTimeout(scan, 8000);
+  setTimeout(function () { console.log("[dexdump] finished, " + count + " dex saved to " + SAVE_DIR); }, 9000);
 })();

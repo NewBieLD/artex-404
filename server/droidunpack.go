@@ -30,8 +30,12 @@ const (
 	deviceFridaPort   = 27042
 )
 
-// dexDumpScript 与哨兵 11ee8e99 的内建 dex_dump 逐字节一致(改动会破坏与
-// 哨兵侧脚本的对照;参数化能力不在本脚本)。
+// dexDumpScript 源自哨兵 11ee8e99 的内建 dex_dump,有一处刻意偏离:去掉了
+// Java.perform 包裹(Java 在其中只做 mkdir)。真机踩坑:frida 17.24.1 +
+// Android 16(ColorOS)组合下,脚本加载期(spawn 门控中)执行 Java.perform 会
+// 直接杀死会话("the connection is closed"),8/8 目标全灭;setTimeout 与纯
+// gum 内存操作不受影响。目录预建的职责已上收到 ensureDeviceDumpDir(root
+// 执行),脚本保持纯 gum、无 Java 依赖。
 const dexDumpScript = `(function () {
   var SAVE_DIR = "/data/local/tmp/sentinel-unpack";
   var dumped = {};
@@ -65,14 +69,9 @@ const dexDumpScript = `(function () {
       } catch (e) {}
     });
   }
-  Java.perform(function () {
-    try {
-      Java.use("java.lang.Runtime").getRuntime().exec(["mkdir", "-p", SAVE_DIR]);
-    } catch (e) {}
-    setTimeout(scan, 500);
-    setTimeout(scan, 8000);
-    setTimeout(function () { console.log("[dexdump] finished, " + count + " dex saved to " + SAVE_DIR); }, 9000);
-  });
+  setTimeout(scan, 500);
+  setTimeout(scan, 8000);
+  setTimeout(function () { console.log("[dexdump] finished, " + count + " dex saved to " + SAVE_DIR); }, 9000);
 })();`
 
 // toolWorkDir 工具的工作目录基准:worker 调用时是任务目录,REST/测试回落
@@ -226,13 +225,21 @@ func (s *Server) droidUnpackTool() actool.CoreTool {
 				return actool.Errorf("写入 dex_dump.js 失败: " + wErr.Error()), nil
 			}
 
-			runCtx, cancel := context.WithTimeout(ctx, time.Duration(a.Seconds+10)*time.Second)
+			// frida CLI -q 在加载完脚本后即退出(新版行为,与哨兵容器内老版不同):
+			// --eternalize 让脚本驻留目标进程,CLI 退出后 0.5s/8s 两轮扫描继续跑,
+			// 这里睡满采集窗口再收割。
+			runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(runCtx, fridaBin,
 				"-H", fmt.Sprintf("127.0.0.1:%d", port),
-				"-f", a.App, "-l", scriptPath, "-q")
+				"-f", a.App, "-l", scriptPath, "-q", "--eternalize")
 			out, _ := cmd.CombinedOutput()
 			fridaOut := clampString(string(out), 4000)
+			select {
+			case <-ctx.Done():
+				return actool.Errorf("上下文取消"), nil
+			case <-time.After(time.Duration(a.Seconds) * time.Second):
+			}
 
 			listing, lerr := s.devGW.Request(rec.DeviceID, map[string]any{
 				"t": "exec", "cmd": "ls -la " + deviceDumpDir + "/ 2>/dev/null | head -50", "asRoot": true, "timeoutMs": 15000,
