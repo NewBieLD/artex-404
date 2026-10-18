@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	_ "modernc.org/sqlite"
 	"reflect"
 	"strings"
 	"testing"
