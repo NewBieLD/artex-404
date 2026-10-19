@@ -378,9 +378,28 @@ func isLoopbackHost(h string) bool {
 }
 
 // lanIPv4 取本机首个非回环 IPv4(网卡枚举失败返回空)。
+// 按接口枚举并跳过回环接口:InterfaceAddrs 不带接口归属,WSL2 的 DNS 隧道
+// 地址 10.255.255.254/32 挂在 lo 上,按地址过滤会把它误选为局域网地址。
 func lanIPv4() string {
-	addrs, err := net.InterfaceAddrs()
+	ifaces, err := net.Interfaces()
 	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		if v4 := lanIPv4Of(iface.Flags, addrs); v4 != "" {
+			return v4
+		}
+	}
+	return ""
+}
+
+// lanIPv4Of 从单个接口的地址列表挑首个可用 IPv4;接口回环或未启用时返回空。
+func lanIPv4Of(flags net.Flags, addrs []net.Addr) string {
+	if flags&net.FlagLoopback != 0 || flags&net.FlagUp == 0 {
 		return ""
 	}
 	for _, a := range addrs {
